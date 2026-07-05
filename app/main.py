@@ -10,7 +10,12 @@ from app.utils.logger import setup_logging
 async def main() -> None:
     settings = get_settings(); setup_logging(settings.log_level)
     bot = Bot(settings.bot_token); dp = Dispatcher(storage=MemoryStorage())
-    dp.update.middleware(AuthMiddleware()); dp.update.middleware(MaintenanceMiddleware())
+    auth_middleware = AuthMiddleware()
+    maintenance_middleware = MaintenanceMiddleware()
+    dp.message.middleware(auth_middleware)
+    dp.callback_query.middleware(auth_middleware)
+    dp.message.middleware(maintenance_middleware)
+    dp.callback_query.middleware(maintenance_middleware)
     dp.include_router(common.router); dp.include_router(admin.router); dp.include_router(reseller.router)
     await dp.start_polling(bot)
 
