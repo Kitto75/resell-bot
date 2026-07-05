@@ -5,6 +5,9 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
+_SECRET_KEYS = {"token", "access_token", "authorization", "password", "passwd", "secret", "api_key", "apikey"}
+_INTERNAL_CREATE_KEYS = {"validity_days"}
+
 class MarzbanError(RuntimeError): pass
 
 class MarzbanClient:
@@ -40,7 +43,9 @@ class MarzbanClient:
         return await self._request("GET", f"/api/user/{username}")
     async def create_user(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not self._token: await self.login()
-        return await self._request("POST", "/api/user", json=prepare_create_payload(payload, payload.get("validity_days")))
+        sanitized_payload = prepare_create_payload(payload, payload.get("validity_days"))
+        logger.info("Sending sanitized Marzban create-user payload: %s", redact_secrets(sanitized_payload))
+        return await self._request("POST", "/api/user", json=sanitized_payload)
     async def modify_user(self, username: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not self._token: await self.login()
         return await self._request("PUT", f"/api/user/{username}", json=payload)
@@ -58,10 +63,24 @@ def on_hold_expire_duration(days: int) -> int:
     return max(1, int(days)) * 86400
 
 
+def redact_secrets(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: ("***" if str(key).lower() in _SECRET_KEYS else redact_secrets(item)) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_secrets(item) for item in value]
+    return value
+
+
 def prepare_create_payload(payload: dict[str, Any], validity_days: int | None = None) -> dict[str, Any]:
-    prepared = dict(payload)
-    if prepared.get("status") == "on_hold" and not prepared.get("on_hold_expire_duration"):
-        prepared["on_hold_expire_duration"] = on_hold_expire_duration(validity_days or 1)
+    prepared = {key: value for key, value in payload.items() if key not in _INTERNAL_CREATE_KEYS}
+    if prepared.get("status") == "on_hold":
+        prepared.pop("expire", None)
+        prepared["status"] = "on_hold"
+        if not prepared.get("on_hold_expire_duration"):
+            prepared["on_hold_expire_duration"] = on_hold_expire_duration(validity_days or 1)
+        prepared["on_hold_expire_duration"] = int(prepared["on_hold_expire_duration"])
+        if prepared["on_hold_expire_duration"] <= 0:
+            raise ValueError("on_hold_expire_duration must be greater than zero for on_hold users")
     return prepared
 
 

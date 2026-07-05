@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -11,7 +11,7 @@ from app.keyboards.admin import recharge_actions
 from app.keyboards.common import back_cancel, reseller_confirm
 from app.keyboards.reseller import dashboard
 from app.services.billing import BYTES_PER_GB, BillingService
-from app.services.marzban import MarzbanClient, MarzbanError, extract_last_user_agent, ownership_note, user_belongs_to_reseller
+from app.services.marzban import MarzbanClient, MarzbanError, extract_last_user_agent, on_hold_expire_duration, ownership_note, user_belongs_to_reseller
 from app.services.reports import operation_report
 from app.services.validators import valid_username
 from app.states.reseller import CreateUser, Recharge, RenewUser
@@ -62,7 +62,7 @@ async def create_days(message: Message, state: FSMContext) -> None:
     except ValueError: await message.answer("یک عدد صحیح معتبر وارد کنید."); return
     if days <= 0: await message.answer("مدت اعتبار باید بیشتر از صفر باشد."); return
     data = await state.update_data(days=days); await state.set_state(CreateUser.confirm)
-    await message.answer(f"خلاصه ساخت اکانت\nنام کاربری: {data['username']}\nحجم: {data['gb']} گیگابایت\nمدت: {days} روز\nهزینه: {format_toman(data['cost'])}\nآیا تایید می‌کنید؟", reply_markup=reseller_confirm("res:create:confirm", "res:create"))
+    await message.answer(f"خلاصه ساخت اکانت\nنام کاربری: {data['username']}\nحجم: {data['gb']} گیگابایت\nمدت اعتبار پس از فعال‌سازی: {days} روز\nوضعیت اولیه: در انتظار اتصال\nهزینه: {format_toman(data['cost'])}\nآیا تایید می‌کنید؟", reply_markup=reseller_confirm("res:create:confirm", "res:create"))
 
 @router.callback_query(CreateUser.confirm, F.data == "res:create:confirm")
 async def create_confirm(cb: CallbackQuery, state: FSMContext, reseller: Reseller) -> None:
@@ -71,7 +71,7 @@ async def create_confirm(cb: CallbackQuery, state: FSMContext, reseller: Reselle
         db_reseller = await session.get(type(reseller), reseller.id)
         cost = BillingService(session).calculate_cost(gb, db_reseller.price_per_gb)
         if db_reseller.balance < cost: await cb.message.answer("موجودی کافی نیست."); await state.clear(); await cb.answer(); return
-        payload = {"username": username, "status": "on_hold", "data_limit": gb * BYTES_PER_GB, "expire": int((datetime.now(timezone.utc) + timedelta(days=days)).timestamp()), "validity_days": days, "note": ownership_note(db_reseller.display_name)}
+        payload = {"username": username, "status": "on_hold", "data_limit": gb * BYTES_PER_GB, "on_hold_expire_duration": on_hold_expire_duration(days), "validity_days": days, "note": ownership_note(db_reseller.display_name)}
         try: await client().create_user(payload)
         except MarzbanError as exc: await cb.message.answer(f"خطای مرزبان: {exc}"); await state.clear(); await cb.answer(); return
         log = await BillingService(session).charge_for_operation(db_reseller, username, OperationType.create, gb, days); report = operation_report(db_reseller, log)
