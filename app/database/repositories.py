@@ -1,7 +1,7 @@
 from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.database.models import BotSetting, CreatedUser, RechargeRequest, Reseller, ResellerInbound, ResellerStatus
+from app.database.models import BalanceTransaction, BotSetting, CreatedUser, RechargeRequest, Reseller, ResellerInbound, ResellerStatus, TransactionType
 
 
 class ResellerRepository:
@@ -47,3 +47,13 @@ class RechargeRepository:
         req = RechargeRequest(reseller_id=reseller_id, amount=amount, receipt_file_id=file_id, receipt_text=text)
         self.session.add(req); await self.session.flush(); return req
     async def get(self, request_id: int) -> RechargeRequest | None: return await self.session.get(RechargeRequest, request_id)
+
+
+class TransactionRepository:
+    def __init__(self, session: AsyncSession) -> None: self.session = session
+    async def recent(self, reseller_id: int, tx_type: TransactionType | None = None, limit: int = 5, offset: int = 0) -> list[BalanceTransaction]:
+        stmt = select(BalanceTransaction).where(BalanceTransaction.reseller_id == reseller_id)
+        if tx_type is not None:
+            stmt = stmt.where(BalanceTransaction.type == tx_type)
+        stmt = stmt.order_by(BalanceTransaction.created_at.desc(), BalanceTransaction.id.desc()).limit(limit).offset(offset)
+        return list((await self.session.scalars(stmt)).all())
