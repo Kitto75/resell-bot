@@ -1,4 +1,5 @@
 from decimal import Decimal
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database.models import BalanceTransaction, CreatedUser, OperationLog, OperationType, Reseller, TransactionType
 
@@ -24,3 +25,9 @@ class BillingService:
         if operation == OperationType.create:
             self.session.add(CreatedUser(reseller_id=reseller.id, username=username, total_gb=gb, total_days=days))
         await self.session.flush(); return log
+
+    async def charge_for_create_once(self, reseller: Reseller, username: str, gb: int, days: int) -> OperationLog | None:
+        existing = await self.session.scalar(select(CreatedUser).where(CreatedUser.username == username).with_for_update())
+        if existing is not None:
+            return None
+        return await self.charge_for_operation(reseller, username, OperationType.create, gb, days)

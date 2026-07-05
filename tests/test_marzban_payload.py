@@ -46,3 +46,37 @@ class MarzbanCreatePayloadTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class MarzbanErrorTests(unittest.TestCase):
+    def test_error_keeps_status_code(self):
+        from app.services.marzban import MarzbanError
+
+        exc = MarzbanError("Internal Server Error", 500)
+
+        self.assertEqual(exc.status, 500)
+        self.assertEqual(str(exc), "Internal Server Error")
+
+
+class MarzbanCreateUserTests(unittest.IsolatedAsyncioTestCase):
+    async def test_create_user_disables_5xx_retry(self):
+        from app.services.marzban import MarzbanClient
+
+        captured = {}
+
+        class FakeClient(MarzbanClient):
+            async def login(self):
+                self._token = "token"
+
+            async def _request(self, method, path, *, retry_5xx=True, **kwargs):
+                captured["method"] = method
+                captured["path"] = path
+                captured["retry_5xx"] = retry_5xx
+                captured["json"] = kwargs["json"]
+                return {"ok": True}
+
+        await FakeClient("https://example.test", "admin", "pass").create_user({"username": "u", "status": "active"})
+
+        self.assertEqual(captured["method"], "POST")
+        self.assertEqual(captured["path"], "/api/user")
+        self.assertFalse(captured["retry_5xx"])
+        self.assertEqual(captured["json"]["username"], "u")
