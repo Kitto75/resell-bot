@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     bot_token: str = Field(alias="BOT_TOKEN")
-    admin_ids: list[int] = Field(alias="ADMIN_IDS")
+    admin_ids: list[int] | int | str = Field(alias="ADMIN_IDS")
     marzban_base_url: str = Field(alias="MARZBAN_BASE_URL")
     marzban_username: str = Field(alias="MARZBAN_USERNAME")
     marzban_password: str = Field(alias="MARZBAN_PASSWORD")
@@ -17,9 +17,11 @@ class Settings(BaseSettings):
 
     @field_validator("admin_ids", mode="before")
     @classmethod
-    def parse_admin_ids(cls, value: str | list[int]) -> list[int]:
+    def parse_admin_ids(cls, value: str | int | list[int]) -> list[int]:
+        if isinstance(value, int):
+            return [value]
         if isinstance(value, list):
-            return value
+            return [int(item) for item in value]
         return [int(item.strip()) for item in value.split(",") if item.strip()]
 
     @field_validator("database_url")
