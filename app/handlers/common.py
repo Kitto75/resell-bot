@@ -6,17 +6,18 @@ from app.database.repositories import ResellerRepository
 from app.database.session import SessionLocal
 from app.keyboards.admin import panel
 from app.keyboards.reseller import dashboard
+from app.utils.formatting import format_toman, status_fa
 
 router = Router()
 
 @router.message(CommandStart())
 async def start(message: Message, is_admin: bool, reseller: Reseller | None) -> None:
     if is_admin:
-        await message.answer("Admin panel", reply_markup=panel()); return
+        await message.answer("پنل مدیریت", reply_markup=panel()); return
     if reseller is None:
-        await message.answer("You are not registered as a reseller."); return
+        await message.answer("شما به عنوان ریسلر ثبت نشده‌اید."); return
     if reseller.status != ResellerStatus.active:
-        await message.answer("Your reseller account is disabled."); return
+        await message.answer("حساب ریسلری شما غیرفعال است."); return
     async with SessionLocal() as session:
         count = await ResellerRepository(session).count_users(reseller.id)
-    await message.answer(f"Dashboard\nBalance: {reseller.balance}\nPrice/GB: {reseller.price_per_gb}\nStatus: {reseller.status.value}\nCreated users: {count}", reply_markup=dashboard())
+    await message.answer(f"داشبورد\nموجودی: {format_toman(reseller.balance)}\nقیمت هر گیگابایت: {format_toman(reseller.price_per_gb)}\nوضعیت: {status_fa(reseller.status)}\nکاربران ساخته‌شده: {count}", reply_markup=dashboard())

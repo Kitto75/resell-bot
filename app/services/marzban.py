@@ -40,7 +40,47 @@ class MarzbanClient:
         return await self._request("GET", f"/api/user/{username}")
     async def create_user(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not self._token: await self.login()
-        return await self._request("POST", "/api/user", json=payload)
+        return await self._request("POST", "/api/user", json=prepare_create_payload(payload, payload.get("validity_days")))
     async def modify_user(self, username: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not self._token: await self.login()
         return await self._request("PUT", f"/api/user/{username}", json=payload)
+
+def ownership_note(display_name: str) -> str:
+    return f"belongs to {display_name}"
+
+
+def user_belongs_to_reseller(user_data: dict[str, Any], display_name: str) -> bool:
+    return str(user_data.get("note") or "").strip() == ownership_note(display_name)
+
+
+def on_hold_expire_duration(days: int) -> int:
+    # Marzban expects on-hold duration in seconds; account validity `expire` remains separate.
+    return max(1, int(days)) * 86400
+
+
+def prepare_create_payload(payload: dict[str, Any], validity_days: int | None = None) -> dict[str, Any]:
+    prepared = dict(payload)
+    if prepared.get("status") == "on_hold" and not prepared.get("on_hold_expire_duration"):
+        prepared["on_hold_expire_duration"] = on_hold_expire_duration(validity_days or 1)
+    return prepared
+
+
+def extract_last_user_agent(user_data: dict[str, Any]) -> str:
+    for key in ("last_connected_user_agent", "last_user_agent", "user_agent", "last_connected_device", "last_connected", "last_online", "online_at"):
+        value = user_data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, dict):
+            for nested in ("user_agent", "agent", "app", "device", "name"):
+                nested_value = value.get(nested)
+                if nested_value:
+                    return str(nested_value)
+    for key in ("devices", "usages"):
+        values = user_data.get(key)
+        if isinstance(values, list):
+            for item in reversed(values):
+                if isinstance(item, dict):
+                    found = extract_last_user_agent(item)
+                    if found != "نامشخص":
+                        return found
+    return "نامشخص"
