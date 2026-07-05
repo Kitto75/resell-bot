@@ -6,13 +6,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from app.config import get_settings
 from app.database.models import OperationType, Reseller
-from app.database.repositories import RechargeRepository
+from app.database.repositories import InboundRepository, RechargeRepository
 from app.database.session import SessionLocal
 from app.keyboards.admin import recharge_actions
 from app.keyboards.common import back_cancel, reseller_confirm
 from app.keyboards.reseller import dashboard
 from app.services.billing import BYTES_PER_GB, BillingService
-from app.services.marzban import MarzbanClient, MarzbanError, extract_last_user_agent, on_hold_expire_duration, ownership_note, user_belongs_to_reseller
+from app.services.marzban import MarzbanClient, MarzbanError, create_payload_summary, extract_last_user_agent, on_hold_expire_duration, ownership_note, user_belongs_to_reseller
 from app.services.reports import operation_report
 from app.services.validators import valid_username
 from app.states.reseller import CreateUser, Recharge, RenewUser
@@ -41,35 +41,51 @@ async def fetch_marzban_user(marzban: MarzbanClient, username: str) -> dict | No
         logger.warning("Marzban fallback get_user failed username=%s status=%s", username, exc.status)
         raise
 
-async def create_user_safely(marzban: MarzbanClient, payload: dict, reseller_name: str) -> tuple[bool, str | None]:
+async def create_user_safely(marzban: MarzbanClient, payload: dict, reseller_name: str) -> tuple[bool, str | None, MarzbanError | None]:
     username = str(payload["username"])
     existing = await fetch_marzban_user(marzban, username)
     if existing is not None:
         if user_belongs_to_reseller(existing, reseller_name):
             logger.info("Marzban create precheck username=%s result=exists_owned", username)
-            return False, USERNAME_EXISTS_OWN
+            return False, USERNAME_EXISTS_OWN, None
         logger.info("Marzban create precheck username=%s result=exists_other", username)
-        return False, USERNAME_EXISTS_OTHER
+        return False, USERNAME_EXISTS_OTHER, None
     logger.info("Marzban create attempt username=%s", username)
     try:
         await marzban.create_user(payload)
         logger.info("Marzban create operation username=%s treated_as=success source=create_response", username)
-        return True, None
+        return True, None, None
     except MarzbanError as exc:
         logger.warning("Marzban create failed username=%s status=%s; checking created state", username, exc.status)
         try:
             created = await fetch_marzban_user(marzban, username)
         except MarzbanError:
             logger.info("Marzban create operation username=%s treated_as=failure source=fallback_error", username)
-            return False, MARZBAN_CREATE_FAILED
+            return False, MARZBAN_CREATE_FAILED, exc
         if created is not None and user_belongs_to_reseller(created, reseller_name):
             logger.info("Marzban create operation username=%s treated_as=success source=fallback_get_user", username)
-            return True, None
+            return True, None, None
         if created is not None:
             logger.info("Marzban create operation username=%s treated_as=failure reason=exists_not_owned", username)
-            return False, USERNAME_EXISTS_NOT_YOURS
+            return False, USERNAME_EXISTS_NOT_YOURS, exc
         logger.info("Marzban create operation username=%s treated_as=failure reason=not_found_after_failure", username)
-        return False, MARZBAN_CREATE_FAILED
+        return False, MARZBAN_CREATE_FAILED, exc
+
+
+async def send_create_debug_report(cb: CallbackQuery, username: str, reseller_name: str, exc: MarzbanError, payload: dict) -> None:
+    summary = create_payload_summary(payload)
+    logger.error("Marzban create failed after fallback username=%s reseller=%s status=%s body=%s payload_summary=%s. Create and get_user both failed when applicable; possible schema/payload rejection or Marzban internal API failure.", username, reseller_name, exc.status, exc.message, summary)
+    text = (
+        "گزارش دیباگ خطای ساخت مرزبان\n"
+        f"نام کاربری: {username}\n"
+        f"ریسلر: {reseller_name}\n"
+        f"کد وضعیت: {exc.status}\n"
+        f"پاسخ مرزبان: {str(exc.message)[:1500]}\n"
+        f"خلاصه payload: {summary}\n"
+        "پیشنهاد: مرزبان payload ساخت کاربر را رد کرده یا API مرزبان خطای داخلی داده است. ساخت و سپس بررسی کاربر را در پنل/API مرزبان مقایسه کنید."
+    )
+    for admin_id in get_settings().admin_ids:
+        await cb.bot.send_message(admin_id, text)
 
 @router.callback_query(F.data == "back")
 async def back_to_dashboard(cb: CallbackQuery, state: FSMContext, reseller: Reseller | None) -> None:
@@ -123,12 +139,17 @@ async def create_confirm(cb: CallbackQuery, state: FSMContext, reseller: Reselle
             cost = BillingService(session).calculate_cost(gb, db_reseller.price_per_gb)
             if db_reseller.balance < cost: await cb.message.answer("موجودی کافی نیست."); await state.clear(); await cb.answer(); return
             payload = {"username": username, "status": "on_hold", "data_limit": gb * BYTES_PER_GB, "on_hold_expire_duration": on_hold_expire_duration(days), "validity_days": days, "note": ownership_note(db_reseller.display_name)}
+            marzban = client()
+            allowed_tags = await InboundRepository(session).allowed_tags(db_reseller.id)
             try:
-                ok, error_message = await create_user_safely(client(), payload, db_reseller.display_name)
-            except MarzbanError:
-                logger.exception("Marzban create precheck failed username=%s", username)
+                payload = await marzban.build_create_payload(payload, allowed_tags)
+                ok, error_message, create_error = await create_user_safely(marzban, payload, db_reseller.display_name)
+            except (MarzbanError, ValueError):
+                logger.exception("Marzban create preparation/precheck failed username=%s", username)
                 await cb.message.answer(MARZBAN_CREATE_FAILED); await state.clear(); await cb.answer(); return
             if not ok:
+                if create_error is not None:
+                    await send_create_debug_report(cb, username, db_reseller.display_name, create_error, payload)
                 await cb.message.answer(error_message or MARZBAN_CREATE_FAILED); await state.clear(); await cb.answer(); return
             log = await BillingService(session).charge_for_create_once(db_reseller, username, gb, days)
             if log is None:
