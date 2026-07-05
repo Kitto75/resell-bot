@@ -94,7 +94,7 @@ class CreatedUser(Base):
     total_gb: Mapped[int] = mapped_column(Integer, default=0)
     total_days: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    __table_args__ = (Index("ix_created_users_reseller_username", "reseller_id", "username"),)
+    __table_args__ = (UniqueConstraint("username", name="uq_created_users_username"), Index("ix_created_users_reseller_username", "reseller_id", "username"),)
 
 
 class BotSetting(Base):
