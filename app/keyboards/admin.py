@@ -105,5 +105,12 @@ def balance_action_keyboard(reseller_id: int) -> InlineKeyboardMarkup:
 
 def recharge_actions(request_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ تایید", callback_data=f"adm:recharge:approve:{request_id}"), InlineKeyboardButton(text="❌ رد", callback_data=f"adm:recharge:reject:{request_id}")]
+        [InlineKeyboardButton(text="✅ تایید", callback_data=f"recharge:approve:{request_id}"), InlineKeyboardButton(text="❌ رد", callback_data=f"recharge:reject:{request_id}")]
+    ])
+
+
+def recharge_reject_keyboard(request_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="رد بدون دلیل", callback_data=f"recharge:reject_no_reason:{request_id}")],
+        [InlineKeyboardButton(text="لغو", callback_data=f"recharge:cancel:{request_id}")],
     ])
