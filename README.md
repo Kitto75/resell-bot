@@ -146,16 +146,21 @@ Requests include basic retry handling for transient server-side failures. If a M
 
 ## Telegram usage
 
-### Admin commands
+### Conversation-driven admin panel
 
-```text
-/start
-/add_reseller <telegram_id> <balance> <price_per_gb> <display_name>
-/maintenance on
-/maintenance off
-```
+Admins start with `/start` and manage the bot from the inline Telegram UI. The admin does not need to memorize long slash commands: every operation is available through buttons, step-by-step prompts, validation messages, Back/Cancel controls, and a confirmation screen before anything is saved.
 
-Recharge approvals are handled with inline buttons sent to admins.
+The admin panel supports:
+
+- Add Reseller: collect Telegram ID, initial balance, price per GB, and display name, then confirm creation.
+- Edit Reseller: update display name, price per GB, or status through guided prompts.
+- Edit Balance: increase, decrease, or set a reseller balance after confirmation.
+- Maintenance Mode: view current ON/OFF status and enable or disable it from buttons.
+- Inbound Permissions: select a reseller, allow all inbounds by default, or toggle custom inbound tags one by one before saving.
+- Transactions: select a reseller, filter recent transactions, and paginate through results.
+- Recharge Moderation: approve or reject recharge requests from inline buttons, with confirmation and a rejection-reason conversation.
+
+Slash commands such as `/add_reseller` and `/maintenance` are retained only as shortcuts into the guided conversations; they are not required for normal administration. Recharge approvals are handled with inline buttons sent to admins.
 
 ### Reseller flow
 
@@ -214,7 +219,6 @@ The project uses SQLAlchemy models and Alembic migrations to keep migration simp
 
 ## Future roadmap
 
-- Full inline admin UI for editing resellers and inbound permissions.
 - Role-based admin permissions.
 - Multi-language message catalog.
 - Background synchronization with Marzban.
