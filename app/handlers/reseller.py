@@ -9,6 +9,7 @@ from app.database.repositories import RechargeRepository
 from app.database.session import SessionLocal
 from app.keyboards.admin import recharge_actions
 from app.keyboards.common import back_cancel
+from app.keyboards.reseller import dashboard
 from app.services.billing import BYTES_PER_GB, BillingService, InsufficientBalanceError
 from app.services.marzban import MarzbanClient, MarzbanError
 from app.services.reports import operation_report
@@ -19,6 +20,30 @@ router = Router()
 
 def client() -> MarzbanClient:
     s = get_settings(); return MarzbanClient(s.marzban_base_url, s.marzban_username, s.marzban_password)
+
+
+@router.callback_query(F.data == "back")
+async def back_to_dashboard(cb: CallbackQuery, state: FSMContext, reseller: Reseller | None) -> None:
+    await state.clear()
+    if reseller is None:
+        await cb.answer("Reseller account not found.", show_alert=True)
+        return
+    await cb.message.answer("Dashboard", reply_markup=dashboard())
+    await cb.answer()
+
+@router.callback_query(F.data == "res:help")
+async def help_start(cb: CallbackQuery, reseller: Reseller | None) -> None:
+    if reseller is None:
+        await cb.answer("Reseller account not found.", show_alert=True)
+        return
+    await cb.message.answer(
+        "Help\n"
+        "• Create User: add a new Marzban user and charge your balance.\n"
+        "• Renew User: add traffic and days to an existing user.\n"
+        "• Request Balance: send a top-up amount and receipt to admins.\n"
+        "Use ❌ Cancel to leave any active form."
+    )
+    await cb.answer()
 
 @router.callback_query(F.data == "cancel")
 async def cancel(cb: CallbackQuery, state: FSMContext) -> None:
