@@ -28,6 +28,21 @@ async def maintenance(message: Message, is_admin: bool) -> None:
     async with SessionLocal() as session, session.begin(): await SettingsRepository(session).set_bool("maintenance_mode", enabled)
     await message.answer(f"Maintenance mode {'enabled' if enabled else 'disabled'}.")
 
+
+@router.callback_query(F.data.in_({"adm:resellers", "adm:tx", "adm:maintenance", "adm:inbounds"}))
+async def admin_panel_action(callback: CallbackQuery, is_admin: bool) -> None:
+    if not is_admin:
+        await callback.answer("Admins only.", show_alert=True)
+        return
+    actions = {
+        "adm:resellers": "Use /add_reseller <telegram_id> <balance> <price_per_gb> <display_name> to add a reseller.",
+        "adm:tx": "Transaction browsing is not available from the inline panel yet.",
+        "adm:maintenance": "Use /maintenance on or /maintenance off to change maintenance mode.",
+        "adm:inbounds": "Inbound management is not available from the inline panel yet.",
+    }
+    await callback.message.answer(actions[callback.data])
+    await callback.answer()
+
 @router.callback_query(F.data.startswith("adm:recharge:"))
 async def recharge_action(callback: CallbackQuery, is_admin: bool) -> None:
     if not is_admin: return
