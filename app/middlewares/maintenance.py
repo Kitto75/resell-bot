@@ -1,6 +1,6 @@
 from typing import Any, Awaitable, Callable
 from aiogram import BaseMiddleware
-from aiogram.types import Message, TelegramObject
+from aiogram.types import CallbackQuery, Message, TelegramObject
 from app.database.repositories import SettingsRepository
 from app.database.session import SessionLocal
 
@@ -10,6 +10,9 @@ class MaintenanceMiddleware(BaseMiddleware):
         async with SessionLocal() as session:
             enabled = await SettingsRepository(session).get_bool("maintenance_mode")
         if enabled:
-            if isinstance(event, Message): await event.answer("🔧 Bot is currently under maintenance. Please try again later.")
+            if isinstance(event, Message):
+                await event.answer("🔧 Bot is currently under maintenance. Please try again later.")
+            elif isinstance(event, CallbackQuery):
+                await event.answer("🔧 Bot is currently under maintenance. Please try again later.", show_alert=True)
             return None
         return await handler(event, data)
