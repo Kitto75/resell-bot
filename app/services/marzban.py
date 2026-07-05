@@ -28,7 +28,7 @@ class MarzbanClient:
                     if resp.status == 401 and path != "/api/admin/token":
                         self._token = None; await self.login(); continue
                     if resp.status >= 400:
-                        text = await resp.text(); logger.warning("Marzban API error %s: %s", resp.status, text)
+                        text = await resp.text(); logger.warning("Marzban API error method=%s path=%s status=%s body=%s", method, path, resp.status, text)
                         if retry_5xx and attempt < max_attempts - 1 and resp.status >= 500: await asyncio.sleep(1 + attempt); continue
                         raise MarzbanError(text, resp.status)
                     if resp.content_type == "application/json": return await resp.json()
@@ -42,20 +42,80 @@ class MarzbanClient:
         if not self._token: await self.login()
         data = await self._request("GET", "/api/inbounds")
         if isinstance(data, dict):
-            return [item for items in data.values() for item in (items if isinstance(items, list) else [])]
+            flattened: list[dict[str, Any]] = []
+            for protocol, items in data.items():
+                for item in (items if isinstance(items, list) else []):
+                    if isinstance(item, dict):
+                        flattened.append({"protocol": item.get("protocol") or protocol, **item})
+                    else:
+                        flattened.append({"protocol": protocol, "tag": str(item)})
+            return flattened
         return data
+    async def list_users(self, limit: int = 50) -> list[dict[str, Any]]:
+        if not self._token: await self.login()
+        data = await self._request("GET", f"/api/users?limit={limit}")
+        if isinstance(data, dict):
+            users = data.get("users") or data.get("items") or []
+            return [user for user in users if isinstance(user, dict)]
+        return [user for user in data if isinstance(user, dict)] if isinstance(data, list) else []
     async def get_user(self, username: str) -> dict[str, Any]:
         if not self._token: await self.login()
         return await self._request("GET", f"/api/user/{username}")
     async def create_user(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not self._token: await self.login()
         sanitized_payload = prepare_create_payload(payload, payload.get("validity_days"))
-        logger.info("Sending sanitized Marzban create-user payload: %s", redact_secrets(sanitized_payload))
+        logger.info("Marzban create-user sanitized payload summary: %s", create_payload_summary(sanitized_payload))
+        logger.debug("Marzban create-user sanitized payload: %s", redact_secrets(sanitized_payload))
         logger.info("Marzban create-user attempt username=%s", sanitized_payload.get("username"))
-        return await self._request("POST", "/api/user", json=sanitized_payload, retry_5xx=False)
+        try:
+            return await self._request("POST", "/api/user", json=sanitized_payload, retry_5xx=False)
+        except MarzbanError as exc:
+            if exc.status and exc.status >= 500:
+                logger.error("Marzban create-user returned %s. This may be a Marzban schema/payload rejection or internal API failure. body=%s payload_summary=%s", exc.status, exc.message, create_payload_summary(sanitized_payload))
+            raise
     async def modify_user(self, username: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not self._token: await self.login()
         return await self._request("PUT", f"/api/user/{username}", json=payload)
+    async def build_create_payload(self, payload: dict[str, Any], allowed_inbound_tags: list[str] | None = None) -> dict[str, Any]:
+        prepared = {key: value for key, value in payload.items() if key not in _INTERNAL_CREATE_KEYS}
+        prepared.setdefault("data_limit_reset_strategy", "no_reset")
+        if prepared.get("proxies") and prepared.get("inbounds"):
+            return prepare_create_payload(prepared, payload.get("validity_days"))
+        template = await self._create_template_from_existing_user(allowed_inbound_tags)
+        if template is None:
+            template = await self._create_template_from_inbounds(allowed_inbound_tags)
+        prepared.update(template)
+        return prepare_create_payload(prepared, payload.get("validity_days"))
+    async def _create_template_from_existing_user(self, allowed_inbound_tags: list[str] | None = None) -> dict[str, Any] | None:
+        try:
+            users = await self.list_users(50)
+        except MarzbanError as exc:
+            logger.warning("Could not fetch Marzban sample users for create template status=%s", exc.status)
+            return None
+        allowed = set(allowed_inbound_tags or [])
+        for user in users:
+            proxies = user.get("proxies")
+            inbounds = _filter_inbounds(user.get("inbounds"), allowed)
+            if isinstance(proxies, dict) and proxies and inbounds:
+                logger.info("Using Marzban user template from existing user username=%s payload_summary=%s", user.get("username"), create_payload_summary({"proxies": proxies, "inbounds": inbounds}))
+                return {"proxies": proxies, "inbounds": inbounds}
+        return None
+    async def _create_template_from_inbounds(self, allowed_inbound_tags: list[str] | None = None) -> dict[str, Any]:
+        inbounds = await self.get_inbounds()
+        allowed = set(allowed_inbound_tags or [])
+        grouped: dict[str, list[str]] = {}
+        for inbound in inbounds:
+            if not isinstance(inbound, dict):
+                continue
+            tag = inbound.get("tag") or inbound.get("remark")
+            protocol = inbound.get("protocol") or inbound.get("type")
+            if not tag or not protocol or (allowed and str(tag) not in allowed):
+                continue
+            grouped.setdefault(str(protocol), []).append(str(tag))
+        if not grouped:
+            raise MarzbanError("No Marzban inbounds are available to build create-user payload")
+        proxies = {protocol: {} for protocol in grouped}
+        return {"proxies": proxies, "inbounds": grouped}
 
 def ownership_note(display_name: str) -> str:
     return f"belongs to {display_name}"
@@ -78,8 +138,42 @@ def redact_secrets(value: Any) -> Any:
     return value
 
 
+def _filter_inbounds(value: Any, allowed: set[str]) -> dict[str, list[str]]:
+    if not isinstance(value, dict):
+        return {}
+    filtered: dict[str, list[str]] = {}
+    for protocol, tags in value.items():
+        if not isinstance(tags, list):
+            continue
+        selected = [str(tag) for tag in tags if not allowed or str(tag) in allowed]
+        if selected:
+            filtered[str(protocol)] = selected
+    return filtered
+
+
+def create_payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    inbounds = payload.get("inbounds") if isinstance(payload.get("inbounds"), dict) else {}
+    inbound_counts = {str(protocol): len(tags) for protocol, tags in inbounds.items() if isinstance(tags, list)}
+    return {
+        "username": payload.get("username"),
+        "status": payload.get("status"),
+        "data_limit": payload.get("data_limit"),
+        "on_hold_expire_duration": payload.get("on_hold_expire_duration"),
+        "proxies_keys": sorted((payload.get("proxies") or {}).keys()) if isinstance(payload.get("proxies"), dict) else [],
+        "inbound_tags_count": sum(inbound_counts.values()),
+        "inbound_counts": inbound_counts,
+        "data_limit_reset_strategy": payload.get("data_limit_reset_strategy"),
+        "note": payload.get("note"),
+    }
+
+
 def prepare_create_payload(payload: dict[str, Any], validity_days: int | None = None) -> dict[str, Any]:
     prepared = {key: value for key, value in payload.items() if key not in _INTERNAL_CREATE_KEYS}
+    prepared.setdefault("data_limit_reset_strategy", "no_reset")
+    if not isinstance(prepared.get("proxies"), dict) or not prepared.get("proxies"):
+        raise ValueError("Marzban create-user payload requires non-empty proxies")
+    if not isinstance(prepared.get("inbounds"), dict) or not prepared.get("inbounds"):
+        raise ValueError("Marzban create-user payload requires non-empty inbounds")
     if prepared.get("status") == "on_hold":
         prepared.pop("expire", None)
         prepared["status"] = "on_hold"
