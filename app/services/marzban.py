@@ -7,6 +7,7 @@ logger = logging.getLogger(__name__)
 
 _SECRET_KEYS = {"token", "access_token", "authorization", "password", "passwd", "secret", "api_key", "apikey"}
 _INTERNAL_CREATE_KEYS = {"validity_days"}
+_ON_HOLD_ACTIVATION_KEYS = {"expire", "on_hold_timeout", "on_hold_timeout_duration", "activation_deadline", "activate_at", "active_at"}
 
 class MarzbanError(RuntimeError):
     def __init__(self, message: str, status: int | None = None) -> None:
@@ -158,12 +159,14 @@ def create_payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "username": payload.get("username"),
         "status": payload.get("status"),
         "data_limit": payload.get("data_limit"),
+        "expire": payload.get("expire"),
         "on_hold_expire_duration": payload.get("on_hold_expire_duration"),
         "proxies_keys": sorted((payload.get("proxies") or {}).keys()) if isinstance(payload.get("proxies"), dict) else [],
         "inbound_tags_count": sum(inbound_counts.values()),
         "inbound_counts": inbound_counts,
         "data_limit_reset_strategy": payload.get("data_limit_reset_strategy"),
         "note": payload.get("note"),
+        "activation_keys_present": sorted(key for key in _ON_HOLD_ACTIVATION_KEYS if key in payload),
     }
 
 
@@ -175,7 +178,8 @@ def prepare_create_payload(payload: dict[str, Any], validity_days: int | None = 
     if not isinstance(prepared.get("inbounds"), dict) or not prepared.get("inbounds"):
         raise ValueError("Marzban create-user payload requires non-empty inbounds")
     if prepared.get("status") == "on_hold":
-        prepared.pop("expire", None)
+        for key in _ON_HOLD_ACTIVATION_KEYS:
+            prepared.pop(key, None)
         prepared["status"] = "on_hold"
         if not prepared.get("on_hold_expire_duration"):
             prepared["on_hold_expire_duration"] = on_hold_expire_duration(validity_days or 1)

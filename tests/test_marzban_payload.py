@@ -1,4 +1,12 @@
+import os
 import unittest
+
+os.environ.setdefault("BOT_TOKEN", "123:test")
+os.environ.setdefault("ADMIN_IDS", "1")
+os.environ.setdefault("MARZBAN_BASE_URL", "https://example.test")
+os.environ.setdefault("MARZBAN_USERNAME", "admin")
+os.environ.setdefault("MARZBAN_PASSWORD", "pass")
+os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 
 from app.services.marzban import create_payload_summary, on_hold_expire_duration, prepare_create_payload, redact_secrets
 
@@ -130,3 +138,89 @@ class MarzbanTemplateTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(payload["proxies"], {"vless": {}, "vmess": {}})
         self.assertEqual(payload["inbounds"], {"vless": ["VLESS TCP"], "vmess": ["VMess TCP"]})
+
+class MarzbanOnHoldSafetyTests(unittest.TestCase):
+    def test_on_hold_payload_removes_activation_fields(self):
+        prepared = prepare_create_payload(
+            {
+                "username": "test_user",
+                "status": "on_hold",
+                "expire": 1_720_000_000,
+                "on_hold_timeout": 123,
+                "activation_deadline": 456,
+                "on_hold_expire_duration": 86_400,
+                "proxies": {"vless": {}},
+                "inbounds": {"vless": ["VLESS TCP"]},
+            },
+            validity_days=1,
+        )
+
+        self.assertEqual(prepared["status"], "on_hold")
+        self.assertEqual(prepared["on_hold_expire_duration"], 86_400)
+        self.assertNotIn("expire", prepared)
+        self.assertNotIn("on_hold_timeout", prepared)
+        self.assertNotIn("activation_deadline", prepared)
+
+
+class MarzbanCreateSafetyFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_create_user_safely_fetches_created_user_without_subscription(self):
+        from app.handlers.reseller import create_user_safely
+        from app.services.marzban import ownership_note
+
+        calls = []
+
+        class FakeClient:
+            async def get_user(self, username):
+                calls.append(("get_user", username))
+                if calls.count(("get_user", username)) == 1:
+                    from app.services.marzban import MarzbanError
+                    raise MarzbanError("not found", 404)
+                return {"username": username, "status": "on_hold", "used_traffic": 0, "online": False, "expire": None, "note": ownership_note("reseller")}
+
+            async def create_user(self, payload):
+                calls.append(("create_user", payload["username"]))
+                return {"ok": True}
+
+            async def modify_user(self, username, payload):  # pragma: no cover - must not be called
+                calls.append(("modify_user", username))
+
+        ok, message, error, created = await create_user_safely(FakeClient(), {"username": "new_user"}, "reseller")
+
+        self.assertTrue(ok)
+        self.assertIsNone(message)
+        self.assertIsNone(error)
+        self.assertEqual(created["status"], "on_hold")
+        self.assertEqual([call[0] for call in calls], ["get_user", "create_user", "get_user"])
+
+    async def test_create_user_safely_corrects_active_user(self):
+        from app.handlers.reseller import create_user_safely
+        from app.services.marzban import MarzbanError, ownership_note
+
+        class FakeClient:
+            def __init__(self):
+                self.gets = 0
+                self.modified = False
+
+            async def get_user(self, username):
+                self.gets += 1
+                if self.gets == 1:
+                    raise MarzbanError("not found", 404)
+                if self.modified:
+                    return {"username": username, "status": "on_hold", "used_traffic": 0, "online": False, "expire": None, "note": ownership_note("reseller")}
+                return {"username": username, "status": "active", "used_traffic": 0, "online": False, "expire": 123, "note": ownership_note("reseller")}
+
+            async def create_user(self, payload):
+                return {"ok": True}
+
+            async def modify_user(self, username, payload):
+                self.modified = True
+                self.payload = payload
+                return {"ok": True}
+
+        fake = FakeClient()
+        ok, _, _, created = await create_user_safely(fake, {"username": "new_user"}, "reseller")
+
+        self.assertTrue(ok)
+        self.assertTrue(fake.modified)
+        self.assertEqual(fake.payload["status"], "on_hold")
+        self.assertEqual(created["status"], "on_hold")

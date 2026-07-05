@@ -10,7 +10,7 @@ from app.database.repositories import InboundRepository, RechargeRepository
 from app.database.session import SessionLocal
 from app.keyboards.admin import recharge_actions
 from app.keyboards.common import back_cancel, reseller_confirm
-from app.keyboards.reseller import dashboard
+from app.keyboards.reseller import created_user_actions, dashboard
 from app.services.billing import BYTES_PER_GB, BillingService
 from app.services.marzban import MarzbanClient, MarzbanError, create_payload_summary, extract_last_user_agent, on_hold_expire_duration, ownership_note, user_belongs_to_reseller
 from app.services.reports import operation_report
@@ -41,35 +41,82 @@ async def fetch_marzban_user(marzban: MarzbanClient, username: str) -> dict | No
         logger.warning("Marzban fallback get_user failed username=%s status=%s", username, exc.status)
         raise
 
-async def create_user_safely(marzban: MarzbanClient, payload: dict, reseller_name: str) -> tuple[bool, str | None, MarzbanError | None]:
+def _user_is_online(user: dict) -> bool:
+    for key in ("online", "is_online"):
+        value = user.get(key)
+        if isinstance(value, bool):
+            return value
+    return bool(user.get("online_at") or user.get("last_online")) and str(user.get("status")) == "active"
+
+
+def _user_used_traffic(user: dict) -> int:
+    try:
+        return int(user.get("used_traffic") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _log_created_user_state(username: str, user: dict | None, subscription_fetched: bool) -> None:
+    if user is None:
+        logger.critical("Marzban on_hold post-create verification username=%s result=missing subscription_config_fetched=%s", username, subscription_fetched)
+        return
+    logger.info(
+        "Marzban on_hold post-create verification username=%s returned_status=%s returned_expire=%s returned_on_hold_expire_duration=%s returned_used_traffic=%s returned_online=%s returned_last_online=%s subscription_config_fetched=%s",
+        username, user.get("status"), user.get("expire"), user.get("on_hold_expire_duration"), user.get("used_traffic"), _user_is_online(user), user.get("last_online") or user.get("online_at"), subscription_fetched,
+    )
+
+
+async def _force_on_hold_if_needed(marzban: MarzbanClient, username: str, user: dict | None) -> tuple[dict | None, bool]:
+    if user is None or user.get("status") == "on_hold":
+        return user, False
+    logger.critical("Marzban created user is not on_hold username=%s returned_status=%s; attempting corrective update", username, user.get("status"))
+    try:
+        await marzban.modify_user(username, {"status": "on_hold", "expire": None})
+        corrected = await fetch_marzban_user(marzban, username)
+        return corrected, corrected is not None and corrected.get("status") == "on_hold"
+    except MarzbanError as exc:
+        logger.critical("Marzban corrective on_hold update failed username=%s status=%s body=%s", username, exc.status, exc.message)
+        return user, False
+
+
+async def create_user_safely(marzban: MarzbanClient, payload: dict, reseller_name: str) -> tuple[bool, str | None, MarzbanError | None, dict | None]:
     username = str(payload["username"])
     existing = await fetch_marzban_user(marzban, username)
     if existing is not None:
         if user_belongs_to_reseller(existing, reseller_name):
             logger.info("Marzban create precheck username=%s result=exists_owned", username)
-            return False, USERNAME_EXISTS_OWN, None
+            return False, USERNAME_EXISTS_OWN, None, existing
         logger.info("Marzban create precheck username=%s result=exists_other", username)
-        return False, USERNAME_EXISTS_OTHER, None
+        return False, USERNAME_EXISTS_OTHER, None, existing
     logger.info("Marzban create attempt username=%s", username)
     try:
         await marzban.create_user(payload)
+        created = await fetch_marzban_user(marzban, username)
+        _log_created_user_state(username, created, subscription_fetched=False)
+        created, corrected = await _force_on_hold_if_needed(marzban, username, created)
+        if created is not None and (created.get("status") != "on_hold" or _user_used_traffic(created) != 0 or _user_is_online(created) or created.get("expire")):
+            logger.critical("Marzban on_hold invariant violation username=%s status=%s expire=%s used_traffic=%s online=%s corrected=%s", username, created.get("status"), created.get("expire"), created.get("used_traffic"), _user_is_online(created), corrected)
         logger.info("Marzban create operation username=%s treated_as=success source=create_response", username)
-        return True, None, None
+        return True, None, None, created
     except MarzbanError as exc:
         logger.warning("Marzban create failed username=%s status=%s; checking created state", username, exc.status)
         try:
             created = await fetch_marzban_user(marzban, username)
         except MarzbanError:
             logger.info("Marzban create operation username=%s treated_as=failure source=fallback_error", username)
-            return False, MARZBAN_CREATE_FAILED, exc
+            return False, MARZBAN_CREATE_FAILED, exc, None
         if created is not None and user_belongs_to_reseller(created, reseller_name):
+            _log_created_user_state(username, created, subscription_fetched=False)
+            created, corrected = await _force_on_hold_if_needed(marzban, username, created)
+            if created is not None and (created.get("status") != "on_hold" or _user_used_traffic(created) != 0 or _user_is_online(created) or created.get("expire")):
+                logger.critical("Marzban on_hold invariant violation username=%s status=%s expire=%s used_traffic=%s online=%s corrected=%s", username, created.get("status"), created.get("expire"), created.get("used_traffic"), _user_is_online(created), corrected)
             logger.info("Marzban create operation username=%s treated_as=success source=fallback_get_user", username)
-            return True, None, None
+            return True, None, None, created
         if created is not None:
             logger.info("Marzban create operation username=%s treated_as=failure reason=exists_not_owned", username)
-            return False, USERNAME_EXISTS_NOT_YOURS, exc
+            return False, USERNAME_EXISTS_NOT_YOURS, exc, created
         logger.info("Marzban create operation username=%s treated_as=failure reason=not_found_after_failure", username)
-        return False, MARZBAN_CREATE_FAILED, exc
+        return False, MARZBAN_CREATE_FAILED, exc, None
 
 
 async def send_create_debug_report(cb: CallbackQuery, username: str, reseller_name: str, exc: MarzbanError, payload: dict) -> None:
@@ -143,7 +190,7 @@ async def create_confirm(cb: CallbackQuery, state: FSMContext, reseller: Reselle
             allowed_tags = await InboundRepository(session).allowed_tags(db_reseller.id)
             try:
                 payload = await marzban.build_create_payload(payload, allowed_tags)
-                ok, error_message, create_error = await create_user_safely(marzban, payload, db_reseller.display_name)
+                ok, error_message, create_error, created_user = await create_user_safely(marzban, payload, db_reseller.display_name)
             except (MarzbanError, ValueError):
                 logger.exception("Marzban create preparation/precheck failed username=%s", username)
                 await cb.message.answer(MARZBAN_CREATE_FAILED); await state.clear(); await cb.answer(); return
@@ -159,7 +206,14 @@ async def create_confirm(cb: CallbackQuery, state: FSMContext, reseller: Reselle
                 report = operation_report(db_reseller, log)
     if report:
         for admin_id in get_settings().admin_ids: await cb.bot.send_message(admin_id, report)
-    await state.clear(); await cb.message.answer(f"✅ اکانت با موفقیت ساخته شد.\nنام کاربری: {username}\nحجم: {format_bytes_to_gb(gb * BYTES_PER_GB)}\nمدت: {days} روز\nهزینه: {format_toman(cost)}"); await cb.answer()
+    created_status = (created_user or {}).get("status", "on_hold")
+    warning = "" if created_status == "on_hold" else "\n⚠️ اکانت ساخته شد اما وضعیت آن on_hold نیست. لطفاً تنظیمات Marzban یا payload ساخت کاربر بررسی شود."
+    await state.clear(); await cb.message.answer(f"✅ اکانت با موفقیت ساخته شد.\nنام کاربری: {username}\nحجم: {format_bytes_to_gb(gb * BYTES_PER_GB)}\nمدت اعتبار پس از فعال‌سازی: {days} روز\nوضعیت: {status_fa(created_status)}\nیادداشت: {ownership_note(reseller.display_name)}\nهزینه: {format_toman(cost)}\n\nبرای جلوگیری از فعال‌سازی ناخواسته، لینک اشتراک یا کانفیگ به‌صورت خودکار دریافت نشد.{warning}", reply_markup=created_user_actions(username)); await cb.answer()
+
+@router.callback_query(F.data.startswith("res:subscription:"))
+async def subscription_link_warning(cb: CallbackQuery) -> None:
+    await cb.message.answer("دریافت خودکار لینک اشتراک برای اکانت‌های در انتظار اتصال غیرفعال است تا اکانت ناخواسته فعال نشود. در صورت نیاز، لینک را مستقیماً از پنل Marzban و با آگاهی از رفتار on_hold دریافت کنید.")
+    await cb.answer()
 
 @router.callback_query(F.data == "res:renew")
 async def renew_start(cb: CallbackQuery, state: FSMContext, reseller: Reseller | None) -> None:
