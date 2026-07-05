@@ -72,6 +72,8 @@ class RechargeRequest(Base):
     receipt_text: Mapped[str | None] = mapped_column(Text)
     status: Mapped[RechargeStatus] = mapped_column(SAEnum(RechargeStatus), default=RechargeStatus.pending)
     admin_reason: Mapped[str | None] = mapped_column(Text)
+    processed_by_admin_id: Mapped[int | None] = mapped_column(Integer)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
