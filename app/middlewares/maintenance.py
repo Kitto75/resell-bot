@@ -11,8 +11,8 @@ class MaintenanceMiddleware(BaseMiddleware):
             enabled = await SettingsRepository(session).get_bool("maintenance_mode")
         if enabled:
             if isinstance(event, Message):
-                await event.answer("🔧 Bot is currently under maintenance. Please try again later.")
+                await event.answer("🔧 ربات در حال تعمیرات است. لطفا بعدا دوباره تلاش کنید.")
             elif isinstance(event, CallbackQuery):
-                await event.answer("🔧 Bot is currently under maintenance. Please try again later.", show_alert=True)
+                await event.answer("🔧 ربات در حال تعمیرات است. لطفا بعدا دوباره تلاش کنید.", show_alert=True)
             return None
         return await handler(event, data)
