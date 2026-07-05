@@ -8,23 +8,29 @@ logger = logging.getLogger(__name__)
 _SECRET_KEYS = {"token", "access_token", "authorization", "password", "passwd", "secret", "api_key", "apikey"}
 _INTERNAL_CREATE_KEYS = {"validity_days"}
 
-class MarzbanError(RuntimeError): pass
+class MarzbanError(RuntimeError):
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
 
 class MarzbanClient:
     def __init__(self, base_url: str, username: str, password: str) -> None:
         self.base_url = base_url.rstrip("/"); self.username = username; self.password = password; self._token: str | None = None
-    async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+    async def _request(self, method: str, path: str, *, retry_5xx: bool = True, **kwargs: Any) -> Any:
         headers = kwargs.pop("headers", {})
         if self._token: headers["Authorization"] = f"Bearer {self._token}"
-        for attempt in range(3):
+        max_attempts = 3 if retry_5xx else 1
+        for attempt in range(max_attempts):
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
                 async with session.request(method, f"{self.base_url}{path}", headers=headers, **kwargs) as resp:
+                    logger.info("Marzban API response status method=%s path=%s status=%s attempt=%s", method, path, resp.status, attempt + 1)
                     if resp.status == 401 and path != "/api/admin/token":
                         self._token = None; await self.login(); continue
                     if resp.status >= 400:
                         text = await resp.text(); logger.warning("Marzban API error %s: %s", resp.status, text)
-                        if attempt < 2 and resp.status >= 500: await asyncio.sleep(1 + attempt); continue
-                        raise MarzbanError(text)
+                        if retry_5xx and attempt < max_attempts - 1 and resp.status >= 500: await asyncio.sleep(1 + attempt); continue
+                        raise MarzbanError(text, resp.status)
                     if resp.content_type == "application/json": return await resp.json()
                     return await resp.text()
         raise MarzbanError("Marzban request failed after retries")
@@ -45,7 +51,8 @@ class MarzbanClient:
         if not self._token: await self.login()
         sanitized_payload = prepare_create_payload(payload, payload.get("validity_days"))
         logger.info("Sending sanitized Marzban create-user payload: %s", redact_secrets(sanitized_payload))
-        return await self._request("POST", "/api/user", json=sanitized_payload)
+        logger.info("Marzban create-user attempt username=%s", sanitized_payload.get("username"))
+        return await self._request("POST", "/api/user", json=sanitized_payload, retry_5xx=False)
     async def modify_user(self, username: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not self._token: await self.login()
         return await self._request("PUT", f"/api/user/{username}", json=payload)
