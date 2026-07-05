@@ -1,4 +1,6 @@
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+import logging
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -8,7 +10,7 @@ from app.config import get_settings
 from app.database.models import RechargeStatus, ResellerStatus, TransactionType
 from app.database.repositories import InboundRepository, RechargeRepository, ResellerRepository, SettingsRepository, TransactionRepository
 from app.database.session import SessionLocal
-from app.keyboards.admin import admin_back_cancel, balance_action_keyboard, confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_actions, resellers_keyboard, resellers_menu, status_keyboard, tx_filter_keyboard, tx_page_keyboard
+from app.keyboards.admin import admin_back_cancel, balance_action_keyboard, confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_reject_keyboard, resellers_keyboard, resellers_menu, status_keyboard, tx_filter_keyboard, tx_page_keyboard
 from app.services.billing import BillingService
 from app.services.marzban import MarzbanClient, MarzbanError
 from app.utils.formatting import format_toman, status_fa
@@ -16,6 +18,7 @@ from app.states.admin import AddReseller, BalanceEdit, EditReseller, InboundPerm
 
 router = Router()
 PAGE_SIZE = 5
+logger = logging.getLogger(__name__)
 
 
 def client() -> MarzbanClient:
@@ -321,40 +324,156 @@ async def send_tx_page(message: Message, reseller_id: int, tx_type: str, page: i
         lines.append(f"#{tx.id} • {tx.type.value} • {format_toman(tx.amount)} • {format_toman(tx.balance_before)} → {format_toman(tx.balance_after)}\n{tx.created_at} • {tx.description or 'بدون توضیح'}")
     await message.answer("\n".join(lines), reply_markup=tx_page_keyboard(reseller_id, tx_type, page, has_next))
 
+def parse_recharge_callback(data: str | None) -> tuple[str, int] | None:
+    parts = (data or "").split(":")
+    if len(parts) != 3 or parts[0] != "recharge":
+        return None
+    action, raw_req_id = parts[1], parts[2]
+    if action not in {"approve", "reject", "reject_no_reason", "cancel"}:
+        return None
+    try:
+        req_id = int(raw_req_id)
+    except ValueError:
+        return None
+    return action, req_id
+
+
+async def safe_notify_reseller(bot, telegram_id: int, text: str) -> None:
+    try:
+        await bot.send_message(telegram_id, text)
+    except Exception:
+        logger.exception("Failed to notify reseller %s", telegram_id)
+
+
 @router.callback_query(F.data.startswith("adm:recharge:"))
+async def legacy_recharge_action(callback: CallbackQuery) -> None:
+    logger.warning("Legacy recharge callback received: %s", callback.data)
+    await callback.answer("داده نامعتبر است. لطفاً از پیام جدید درخواست شارژ استفاده کنید.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("recharge:"))
 async def recharge_action(callback: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
-    if not is_admin: return
-    _, _, action, req_id = callback.data.split(":")
-    await state.update_data(recharge_action=action, recharge_id=int(req_id))
-    if action == "approve":
-        await state.set_state(RechargeModeration.confirm)
-        await callback.message.answer(f"تایید شارژ درخواست #{req_id} را تایید می‌کنید؟", reply_markup=confirm_keyboard("adm:recharge:confirm", "adm:panel"))
-    else:
+    if not is_admin:
+        await callback.answer("فقط مدیر مجاز است.", show_alert=True)
+        return
+    parsed = parse_recharge_callback(callback.data)
+    if parsed is None:
+        logger.warning("Invalid recharge callback data: %s", callback.data)
+        await callback.answer("داده نامعتبر است.", show_alert=True)
+        return
+
+    action, req_id = parsed
+    if action == "cancel":
+        await state.clear()
+        await callback.message.answer("عملیات رد درخواست شارژ لغو شد.", reply_markup=panel())
+        await callback.answer()
+        return
+    if action == "reject":
+        async with SessionLocal() as session:
+            req = await RechargeRepository(session).get(req_id)
+            if req is None:
+                await callback.answer("درخواست شارژ پیدا نشد.", show_alert=True)
+                return
+            if req.status != RechargeStatus.pending:
+                await callback.answer("این درخواست قبلاً پردازش شده است.", show_alert=True)
+                return
+        await state.update_data(recharge_id=req_id)
         await state.set_state(RechargeModeration.reject_reason)
-        await callback.message.answer(f"دلیل رد درخواست شارژ #{req_id} را وارد کنید.", reply_markup=admin_back_cancel("adm:panel"))
-    await callback.answer()
+        await callback.message.answer(
+            f"دلیل رد درخواست شارژ #{req_id} را وارد کنید. اگر دلیل ندارید، دکمه «رد بدون دلیل» را بزنید.",
+            reply_markup=recharge_reject_keyboard(req_id),
+        )
+        await callback.answer()
+        return
+    if action == "reject_no_reason":
+        await process_recharge(callback, state, req_id, "reject", None)
+        return
+    if action == "approve":
+        await process_recharge(callback, state, req_id, "approve", None)
+        return
+
+    await callback.answer("داده نامعتبر است.", show_alert=True)
+
 
 @router.message(RechargeModeration.reject_reason)
 async def reject_reason(message: Message, state: FSMContext) -> None:
-    reason = (message.text or '').strip()
-    if len(reason) < 3: await message.answer("دلیل رد باید حداقل ۳ کاراکتر باشد."); return
-    await state.update_data(reason=reason); await state.set_state(RechargeModeration.confirm)
-    await message.answer(f"رد درخواست شارژ را تایید می‌کنید؟\nدلیل: {reason}", reply_markup=confirm_keyboard("adm:recharge:confirm", "adm:panel"))
+    reason = (message.text or '').strip() or None
+    data = await state.get_data()
+    req_id = data.get('recharge_id')
+    if req_id is None:
+        await state.clear()
+        await message.answer("داده درخواست شارژ پیدا نشد. لطفاً دوباره تلاش کنید.", reply_markup=panel())
+        return
+    try:
+        async with SessionLocal() as session, session.begin():
+            req = await RechargeRepository(session).get(int(req_id))
+            if req is None:
+                await state.clear()
+                await message.answer("درخواست شارژ پیدا نشد.", reply_markup=panel())
+                return
+            if req.status != RechargeStatus.pending:
+                await state.clear()
+                await message.answer("این درخواست قبلاً پردازش شده است.", reply_markup=panel())
+                return
+            reseller = await ResellerRepository(session).get(req.reseller_id)
+            if reseller is None:
+                await state.clear()
+                await message.answer("ریسلر مربوط به این درخواست پیدا نشد.", reply_markup=panel())
+                return
+            req.status = RechargeStatus.rejected
+            req.admin_reason = reason
+            req.processed_by_admin_id = message.from_user.id if message.from_user else None
+            req.processed_at = datetime.now(timezone.utc)
+            telegram_id = reseller.telegram_id
+            amount = req.amount
+    except Exception:
+        logger.exception("Failed to reject recharge request %s", req_id)
+        await message.answer("خطا در پردازش درخواست شارژ. لطفاً دوباره تلاش کنید.", reply_markup=panel())
+        return
+    await state.clear()
+    reason_line = f"\nدلیل: {reason}" if reason else ""
+    await safe_notify_reseller(message.bot, telegram_id, f"❌ درخواست شارژ شما رد شد.\nمبلغ: {format_toman(amount)}{reason_line}")
+    await message.answer("✅ درخواست شارژ رد شد و به ریسلر اطلاع داده شد.", reply_markup=panel())
 
-@router.callback_query(RechargeModeration.confirm, F.data == "adm:recharge:confirm")
-async def recharge_confirm(callback: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
-    if not is_admin: return
-    data = await state.get_data(); action = data['recharge_action']; req_id = int(data['recharge_id'])
-    async with SessionLocal() as session, session.begin():
-        req = await RechargeRepository(session).get(req_id)
-        if req is None or req.status != RechargeStatus.pending: await callback.answer("این درخواست در دسترس نیست یا قبلا پردازش شده است.", show_alert=True); return
-        reseller = await ResellerRepository(session).get(req.reseller_id)
-        if reseller is None: return
-        if action == "approve":
-            await BillingService(session).change_balance(reseller, req.amount, TransactionType.recharge, f"درخواست شارژ #{req.id}", callback.from_user.id)
-            req.status = RechargeStatus.approved
-            await callback.bot.send_message(reseller.telegram_id, f"✅ درخواست شارژ تایید شد.\nمبلغ: {format_toman(req.amount)}")
-        else:
-            req.status = RechargeStatus.rejected; req.admin_reason = data.get('reason')
-            await callback.bot.send_message(reseller.telegram_id, f"❌ درخواست شارژ رد شد.\nدلیل: {req.admin_reason}")
-    await state.clear(); await callback.message.answer("✅ نتیجه درخواست شارژ ذخیره شد.", reply_markup=panel()); await callback.answer()
+
+async def process_recharge(callback: CallbackQuery, state: FSMContext, req_id: int, action: str, reason: str | None) -> None:
+    try:
+        async with SessionLocal() as session, session.begin():
+            req = await RechargeRepository(session).get(req_id)
+            if req is None:
+                await callback.answer("درخواست شارژ پیدا نشد.", show_alert=True)
+                return
+            if req.status != RechargeStatus.pending:
+                await callback.answer("این درخواست قبلاً پردازش شده است.", show_alert=True)
+                return
+            reseller = await ResellerRepository(session).get(req.reseller_id)
+            if reseller is None:
+                await callback.answer("ریسلر مربوط به این درخواست پیدا نشد.", show_alert=True)
+                return
+            if action == "approve":
+                await BillingService(session).change_balance(reseller, req.amount, TransactionType.recharge, f"تایید درخواست شارژ #{req.id}", callback.from_user.id)
+                req.status = RechargeStatus.approved
+            elif action == "reject":
+                req.status = RechargeStatus.rejected
+                req.admin_reason = reason
+            else:
+                await callback.answer("داده نامعتبر است.", show_alert=True)
+                return
+            req.processed_by_admin_id = callback.from_user.id
+            req.processed_at = datetime.now(timezone.utc)
+            telegram_id = reseller.telegram_id
+            amount = req.amount
+    except Exception:
+        logger.exception("Failed to process recharge request %s with action %s", req_id, action)
+        await callback.answer("خطا در پردازش درخواست شارژ. لطفاً دوباره تلاش کنید.", show_alert=True)
+        return
+
+    await state.clear()
+    if action == "approve":
+        await safe_notify_reseller(callback.bot, telegram_id, f"✅ درخواست شارژ شما تایید شد.\nمبلغ: {format_toman(amount)}")
+        await callback.message.answer(f"✅ درخواست شارژ #{req_id} تایید شد و موجودی ریسلر افزایش یافت.", reply_markup=panel())
+    else:
+        reason_line = f"\nدلیل: {reason}" if reason else ""
+        await safe_notify_reseller(callback.bot, telegram_id, f"❌ درخواست شارژ شما رد شد.\nمبلغ: {format_toman(amount)}{reason_line}")
+        await callback.message.answer(f"✅ درخواست شارژ #{req_id} رد شد و به ریسلر اطلاع داده شد.", reply_markup=panel())
+    await callback.answer()
