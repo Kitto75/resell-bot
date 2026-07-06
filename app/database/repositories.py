@@ -22,13 +22,18 @@ class ResellerRepository:
 
 class SettingsRepository:
     def __init__(self, session: AsyncSession) -> None: self.session = session
+    async def get(self, key: str, default: str | None = None) -> str | None:
+        setting = await self.session.get(BotSetting, key)
+        return default if setting is None else setting.value
+    async def set(self, key: str, value: str) -> None:
+        setting = await self.session.get(BotSetting, key)
+        if setting is None: self.session.add(BotSetting(key=key, value=value))
+        else: setting.value = value
     async def get_bool(self, key: str, default: bool = False) -> bool:
         setting = await self.session.get(BotSetting, key)
         return default if setting is None else setting.value == "1"
     async def set_bool(self, key: str, value: bool) -> None:
-        setting = await self.session.get(BotSetting, key)
-        if setting is None: self.session.add(BotSetting(key=key, value="1" if value else "0"))
-        else: setting.value = "1" if value else "0"
+        await self.set(key, "1" if value else "0")
 
 
 class InboundRepository:

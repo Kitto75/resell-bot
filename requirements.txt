@@ -8,3 +8,4 @@ aiohttp>=3.9
 jdatetime>=5.0
 
 qrcode[pil]>=7.4,<8.0
+APScheduler>=3.10,<4.0
