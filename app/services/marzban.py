@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio, logging
 from typing import Any
 import aiohttp
+from urllib.parse import urljoin
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,13 @@ class MarzbanClient:
             users = data.get("users") or data.get("items") or []
             return [user for user in users if isinstance(user, dict)]
         return [user for user in data if isinstance(user, dict)] if isinstance(data, list) else []
+    def absolute_subscription_url(self, value: str | None) -> str | None:
+        if not value or not value.strip():
+            return None
+        value = value.strip()
+        if value.startswith(("http://", "https://")):
+            return value
+        return urljoin(f"{self.base_url}/", value.lstrip("/"))
     async def get_user(self, username: str) -> dict[str, Any]:
         if not self._token: await self.login()
         return await self._request("GET", f"/api/user/{username}")

@@ -10,11 +10,12 @@ from app.config import get_settings
 from app.database.models import RechargeStatus, ResellerStatus, TransactionType
 from app.database.repositories import InboundRepository, RechargeRepository, ResellerRepository, SettingsRepository, TransactionRepository
 from app.database.session import SessionLocal
-from app.keyboards.admin import admin_back_cancel, balance_action_keyboard, confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_reject_keyboard, resellers_keyboard, resellers_menu, status_keyboard, tx_filter_keyboard, tx_page_keyboard
+from app.keyboards.admin import admin_back_cancel, backup_keyboard, balance_action_keyboard, confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_reject_keyboard, resellers_keyboard, resellers_menu, status_keyboard, tx_filter_keyboard, tx_page_keyboard
+from app.services.backup import get_backup_status, send_database_backup, set_backup_enabled, set_backup_interval, sqlite_backup_supported
 from app.services.billing import BillingService
 from app.services.marzban import MarzbanClient, MarzbanError
 from app.utils.formatting import format_toman, status_fa
-from app.states.admin import AddReseller, BalanceEdit, EditReseller, InboundPermissions, MaintenanceMode, RechargeModeration, TransactionBrowsing
+from app.states.admin import AddReseller, BackupSettings, BalanceEdit, EditReseller, InboundPermissions, MaintenanceMode, RechargeModeration, TransactionBrowsing
 
 router = Router()
 PAGE_SIZE = 5
@@ -31,6 +32,81 @@ def money(text: str | None) -> Decimal | None:
 
 async def show_panel(message: Message) -> None:
     await message.answer("پنل مدیریت\nیک گزینه را انتخاب کنید.", reply_markup=panel())
+
+async def show_backup_menu(message: Message) -> None:
+    if not sqlite_backup_supported():
+        await message.answer("بکاپ خودکار فعلاً فقط برای SQLite پشتیبانی می‌شود.", reply_markup=panel())
+        return
+    enabled, interval, last_time = await get_backup_status()
+    status = "فعال" if enabled else "غیرفعال"
+    await message.answer(
+        f"💾 بکاپ\n\nوضعیت فعلی: {status}\nفاصله زمانی فعلی: {interval} دقیقه\nآخرین بکاپ: {last_time or 'ثبت نشده'}",
+        reply_markup=backup_keyboard(enabled),
+    )
+
+@router.callback_query(F.data == "adm:backup")
+async def backup_menu_cb(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    await state.clear(); await show_backup_menu(cb.message); await cb.answer()
+
+@router.callback_query(F.data == "adm:backup:enable")
+async def backup_enable_cb(cb: CallbackQuery, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    if not sqlite_backup_supported():
+        await cb.message.answer("بکاپ خودکار فعلاً فقط برای SQLite پشتیبانی می‌شود.", reply_markup=panel()); await cb.answer(); return
+    await set_backup_enabled(True)
+    from app.services.scheduler import get_scheduler, schedule_backup_job
+    scheduler = get_scheduler()
+    if scheduler is not None:
+        _, interval, _ = await get_backup_status(); schedule_backup_job(scheduler, cb.bot, interval)
+    await cb.message.answer("✅ بکاپ خودکار فعال شد.")
+    await show_backup_menu(cb.message); await cb.answer()
+
+@router.callback_query(F.data == "adm:backup:disable")
+async def backup_disable_cb(cb: CallbackQuery, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    await set_backup_enabled(False)
+    from app.services.scheduler import get_scheduler, remove_backup_job
+    scheduler = get_scheduler()
+    if scheduler is not None:
+        remove_backup_job(scheduler)
+    await cb.message.answer("✅ بکاپ خودکار غیرفعال شد.")
+    await show_backup_menu(cb.message); await cb.answer()
+
+@router.callback_query(F.data == "adm:backup:interval")
+async def backup_interval_cb(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    await state.set_state(BackupSettings.interval)
+    await cb.message.answer("فاصله زمانی بکاپ خودکار را به دقیقه وارد کنید.", reply_markup=admin_back_cancel("adm:backup")); await cb.answer()
+
+@router.message(BackupSettings.interval)
+async def backup_interval_value(message: Message, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    try:
+        minutes = int((message.text or '').strip())
+    except ValueError:
+        await message.answer("یک عدد صحیح معتبر وارد کنید."); return
+    if minutes < 1:
+        await message.answer("فاصله زمانی باید حداقل ۱ دقیقه باشد."); return
+    await set_backup_interval(minutes)
+    enabled, _, _ = await get_backup_status()
+    from app.services.scheduler import get_scheduler, schedule_backup_job
+    scheduler = get_scheduler()
+    if enabled and scheduler is not None:
+        schedule_backup_job(scheduler, message.bot, minutes)
+    await state.clear(); await message.answer(f"✅ فاصله زمانی بکاپ روی {minutes} دقیقه تنظیم شد.", reply_markup=panel())
+
+@router.callback_query(F.data == "adm:backup:now")
+async def backup_now_cb(cb: CallbackQuery, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    ok = await send_database_backup(cb.bot)
+    await cb.message.answer("✅ بکاپ ارسال شد." if ok else "ارسال بکاپ ناموفق بود. مسیر پایگاه داده و لاگ‌ها را بررسی کنید.")
+    await cb.answer()
 
 @router.callback_query(F.data == "adm:panel")
 async def panel_cb(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:

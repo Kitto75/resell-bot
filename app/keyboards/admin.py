@@ -6,7 +6,7 @@ def panel() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 مدیریت ریسلرها", callback_data="adm:resellers"), InlineKeyboardButton(text="➕ افزودن ریسلر", callback_data="adm:add_reseller")],
         [InlineKeyboardButton(text="🧾 تراکنش‌ها", callback_data="adm:tx"), InlineKeyboardButton(text="🌐 اینباندها", callback_data="adm:inbounds")],
-        [InlineKeyboardButton(text="🛠 حالت تعمیرات", callback_data="adm:maintenance")],
+        [InlineKeyboardButton(text="🛠 حالت تعمیرات", callback_data="adm:maintenance"), InlineKeyboardButton(text="💾 بکاپ", callback_data="adm:backup")],
     ])
 
 
@@ -113,4 +113,17 @@ def recharge_reject_keyboard(request_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="رد بدون دلیل", callback_data=f"recharge:reject_no_reason:{request_id}")],
         [InlineKeyboardButton(text="لغو", callback_data=f"recharge:cancel:{request_id}")],
+    ])
+
+
+def backup_keyboard(enabled: bool) -> InlineKeyboardMarkup:
+    toggle = InlineKeyboardButton(
+        text="غیرفعال‌سازی بکاپ" if enabled else "فعال‌سازی بکاپ",
+        callback_data="adm:backup:disable" if enabled else "adm:backup:enable",
+    )
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [toggle],
+        [InlineKeyboardButton(text="تغییر فاصله زمانی", callback_data="adm:backup:interval")],
+        [InlineKeyboardButton(text="دریافت بکاپ الان", callback_data="adm:backup:now")],
+        [InlineKeyboardButton(text="برگشت", callback_data="adm:panel")],
     ])
