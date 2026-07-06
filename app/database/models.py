@@ -47,6 +47,18 @@ class Reseller(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     transactions: Mapped[list[BalanceTransaction]] = relationship(back_populates="reseller")
+    telegram_accounts: Mapped[list[ResellerTelegramAccount]] = relationship(back_populates="reseller", cascade="all, delete-orphan")
+
+
+class ResellerTelegramAccount(Base):
+    __tablename__ = "reseller_telegram_accounts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    reseller_id: Mapped[int] = mapped_column(ForeignKey("resellers.id", ondelete="CASCADE"), index=True)
+    telegram_id: Mapped[int] = mapped_column(Integer, unique=True, index=True)
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    reseller: Mapped[Reseller] = relationship(back_populates="telegram_accounts")
 
 
 class BalanceTransaction(Base):
@@ -114,4 +126,5 @@ class OperationLog(Base):
     charged_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     balance_before: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     balance_after: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    created_by: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

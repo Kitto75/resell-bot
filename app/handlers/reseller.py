@@ -247,7 +247,7 @@ async def create_confirm(cb: CallbackQuery, state: FSMContext, reseller: Reselle
                 if create_error is not None:
                     await send_create_debug_report(cb, username, db_reseller.display_name, create_error, payload)
                 await cb.message.answer(error_message or MARZBAN_CREATE_FAILED); await state.clear(); await cb.answer(); return
-            log = await BillingService(session).charge_for_create_once(db_reseller, username, gb, days)
+            log = await BillingService(session).charge_for_create_once(db_reseller, username, gb, days, cb.from_user.id)
             if log is None:
                 logger.info("Create charge skipped username=%s reseller_id=%s reason=already_recorded", username, db_reseller.id)
             else:
@@ -272,7 +272,7 @@ async def renew_start(cb: CallbackQuery, state: FSMContext, reseller: Reseller |
 @router.message(RenewUser.username)
 async def renew_username(message: Message, state: FSMContext, reseller: Reseller) -> None:
     username = (message.text or "").strip()
-    try: info = await client().get_user(username)
+    try: info = await client().get_user_with_activity(username)
     except MarzbanError as exc: await message.answer(f"دریافت اطلاعات کاربر ممکن نشد: {exc}"); return
     if not user_belongs_to_reseller(info, reseller.display_name): await message.answer("این اکانت متعلق به شما نیست."); return
     await state.update_data(username=username, info=info); await state.set_state(RenewUser.confirm_user)
@@ -309,7 +309,7 @@ async def renew_confirm(cb: CallbackQuery, state: FSMContext, reseller: Reseller
             base_expire = max(int(user.get("expire") or 0), int(datetime.now(timezone.utc).timestamp()))
             await client().modify_user(username, {"data_limit": int(user.get("data_limit") or 0) + gb * BYTES_PER_GB, "expire": base_expire + days * 86400})
         except MarzbanError as exc: await cb.message.answer(f"خطای مرزبان: {exc}"); await state.clear(); await cb.answer(); return
-        log = await BillingService(session).charge_for_operation(db_reseller, username, OperationType.renew, gb, days); report = operation_report(db_reseller, log)
+        log = await BillingService(session).charge_for_operation(db_reseller, username, OperationType.renew, gb, days, cb.from_user.id); report = operation_report(db_reseller, log)
     for admin_id in get_settings().admin_ids: await cb.bot.send_message(admin_id, report)
     await state.clear(); await cb.message.answer("✅ اکانت با موفقیت تمدید شد."); await cb.answer()
 

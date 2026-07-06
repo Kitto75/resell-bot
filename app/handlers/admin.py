@@ -10,12 +10,12 @@ from app.config import get_settings
 from app.database.models import RechargeStatus, ResellerStatus, TransactionType
 from app.database.repositories import InboundRepository, RechargeRepository, ResellerRepository, SettingsRepository, TransactionRepository
 from app.database.session import SessionLocal
-from app.keyboards.admin import admin_back_cancel, backup_keyboard, balance_action_keyboard, confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_reject_keyboard, resellers_keyboard, resellers_menu, status_keyboard, tx_filter_keyboard, tx_page_keyboard
+from app.keyboards.admin import admin_back_cancel, backup_keyboard, balance_action_keyboard, confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_reject_keyboard, resellers_keyboard, resellers_menu, status_keyboard, telegram_account_keyboard, telegram_accounts_actions, tx_filter_keyboard, tx_page_keyboard
 from app.services.backup import get_backup_status, send_database_backup, set_backup_enabled, set_backup_interval, sqlite_backup_supported
 from app.services.billing import BillingService
 from app.services.marzban import MarzbanClient, MarzbanError
 from app.utils.formatting import format_toman, status_fa
-from app.states.admin import AddReseller, BackupSettings, BalanceEdit, EditReseller, InboundPermissions, MaintenanceMode, RechargeModeration, TransactionBrowsing
+from app.states.admin import AddReseller, BackupSettings, BalanceEdit, EditReseller, InboundPermissions, MaintenanceMode, RechargeModeration, TelegramAccountManagement, TransactionBrowsing
 
 router = Router()
 PAGE_SIZE = 5
@@ -191,7 +191,7 @@ async def reseller_list_cb(cb: CallbackQuery, state: FSMContext, is_admin: bool)
             inbound_mode = "همه اینباندها" if not allowed else "اینباندهای اختصاصی"
             lines.append(
                 f"{idx}. {item.display_name}\n"
-                f"شناسه تلگرام: {item.telegram_id}\n"
+                f"آیدی اصلی تلگرام: {await ResellerRepository(session).primary_telegram_id(item)}\n"
                 f"موجودی: {format_toman(item.balance)}\n"
                 f"قیمت هر گیگابایت: {format_toman(item.price_per_gb)}\n"
                 f"وضعیت: {status_fa(item.status)}\n"
@@ -250,6 +250,68 @@ async def edit_confirm(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> 
         elif data['field'] == 'price_per_gb': reseller.price_per_gb = Decimal(data['value'])
         elif data['field'] == 'status': reseller.status = ResellerStatus(data['value'])
     await state.clear(); await cb.message.answer("✅ ریسلر به‌روزرسانی شد.", reply_markup=panel()); await cb.answer()
+
+
+@router.callback_query(F.data == "adm:tg_accounts")
+async def telegram_accounts_start(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    await select_reseller(cb.message, state, TelegramAccountManagement.select_reseller, "adm:tgsel", "ریسلر موردنظر برای مدیریت اکانت‌های تلگرام را انتخاب کنید."); await cb.answer()
+
+@router.callback_query(F.data.startswith("adm:tgsel:"))
+async def telegram_accounts_menu(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    reseller_id = int(cb.data.rsplit(":", 1)[1])
+    async with SessionLocal() as session:
+        repo = ResellerRepository(session); reseller = await repo.get(reseller_id); accounts = await repo.telegram_accounts(reseller_id)
+    lines = [f"👥 اکانت‌های تلگرام ریسلر {reseller.display_name if reseller else reseller_id}", ""]
+    lines.extend([f"{'⭐ اصلی' if a.is_primary else 'ثانویه'}: {a.telegram_id}" for a in accounts] or ["اکانتی ثبت نشده است."])
+    await state.update_data(reseller_id=reseller_id); await cb.message.answer("\n".join(lines), reply_markup=telegram_accounts_actions(reseller_id)); await cb.answer()
+
+@router.callback_query(F.data.startswith("adm:tg:add:"))
+async def telegram_account_add_start(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    reseller_id = int(cb.data.rsplit(":", 1)[1]); await state.update_data(reseller_id=reseller_id); await state.set_state(TelegramAccountManagement.add)
+    await cb.message.answer("➕ افزودن آیدی تلگرام\nشناسه عددی تلگرام جدید را وارد کنید.", reply_markup=admin_back_cancel(f"adm:tgsel:{reseller_id}")); await cb.answer()
+
+@router.message(TelegramAccountManagement.add)
+async def telegram_account_add_value(message: Message, state: FSMContext) -> None:
+    try: telegram_id = int((message.text or '').strip())
+    except ValueError: await message.answer("شناسه تلگرام باید عدد صحیح باشد."); return
+    data = await state.get_data(); reseller_id = int(data['reseller_id'])
+    try:
+        async with SessionLocal() as session, session.begin():
+            await ResellerRepository(session).add_telegram_account(reseller_id, telegram_id, is_primary=False)
+    except IntegrityError:
+        await message.answer("این آیدی تلگرام قبلاً به یک ریسلر متصل شده است."); return
+    await state.clear(); await message.answer("✅ آیدی تلگرام به ریسلر اضافه شد.", reply_markup=panel())
+
+@router.callback_query(F.data.startswith("adm:tg:remove:"))
+async def telegram_account_remove_list(cb: CallbackQuery, is_admin: bool) -> None:
+    if not is_admin: return
+    reseller_id = int(cb.data.rsplit(":", 1)[1])
+    async with SessionLocal() as session: accounts = await ResellerRepository(session).telegram_accounts(reseller_id)
+    await cb.message.answer("➖ حذف آیدی تلگرام\nآیدی موردنظر را انتخاب کنید. حذف آخرین آیدی مجاز نیست.", reply_markup=telegram_account_keyboard(accounts, "remove", reseller_id)); await cb.answer()
+
+@router.callback_query(F.data.startswith("adm:tg:primary:"))
+async def telegram_account_primary_list(cb: CallbackQuery, is_admin: bool) -> None:
+    if not is_admin: return
+    reseller_id = int(cb.data.rsplit(":", 1)[1])
+    async with SessionLocal() as session: accounts = await ResellerRepository(session).telegram_accounts(reseller_id)
+    await cb.message.answer("⭐ تنظیم به عنوان اصلی\nآیدی موردنظر را انتخاب کنید.", reply_markup=telegram_account_keyboard(accounts, "primary", reseller_id)); await cb.answer()
+
+@router.callback_query(F.data.startswith("adm:tg:remove:acct:"))
+async def telegram_account_remove(cb: CallbackQuery, is_admin: bool) -> None:
+    if not is_admin: return
+    account_id = int(cb.data.rsplit(":", 1)[1])
+    async with SessionLocal() as session, session.begin(): ok = await ResellerRepository(session).remove_telegram_account(account_id)
+    await cb.message.answer("✅ آیدی تلگرام حذف شد." if ok else "حذف ممکن نیست؛ آخرین آیدی تلگرام ریسلر را نمی‌توان حذف کرد.", reply_markup=panel()); await cb.answer()
+
+@router.callback_query(F.data.startswith("adm:tg:primary:acct:"))
+async def telegram_account_primary(cb: CallbackQuery, is_admin: bool) -> None:
+    if not is_admin: return
+    account_id = int(cb.data.rsplit(":", 1)[1])
+    async with SessionLocal() as session, session.begin(): account = await ResellerRepository(session).set_primary_telegram_account(account_id)
+    await cb.message.answer("✅ آیدی اصلی تلگرام تنظیم شد." if account else "آیدی تلگرام پیدا نشد.", reply_markup=panel()); await cb.answer()
 
 @router.callback_query(F.data == "adm:balance")
 async def balance_start(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
