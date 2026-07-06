@@ -161,9 +161,32 @@ class MarzbanOnHoldSafetyTests(unittest.TestCase):
         self.assertNotIn("on_hold_timeout", prepared)
         self.assertNotIn("activation_deadline", prepared)
 
+    def test_on_hold_payload_drops_usage_state_and_link_fields(self):
+        prepared = prepare_create_payload(
+            {
+                "username": "test_user",
+                "status": "on_hold",
+                "data_limit": 1024,
+                "used_traffic": 99,
+                "lifetime_used_traffic": 100,
+                "online_at": "now",
+                "last_connected": "client",
+                "links": ["https://example.test/sub"],
+                "subscription_url": "https://example.test/sub",
+                "on_hold_expire_duration": 86_400,
+                "proxies": {"vless": {}},
+                "inbounds": {"vless": ["VLESS TCP"]},
+            },
+            validity_days=1,
+        )
+
+        self.assertEqual(set(prepared), {"username", "status", "data_limit", "on_hold_expire_duration", "proxies", "inbounds", "data_limit_reset_strategy"})
+        self.assertEqual(prepared["status"], "on_hold")
+
 
 class MarzbanCreateSafetyFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_create_user_safely_fetches_created_user_without_subscription(self):
+        from app.handlers import reseller as reseller_handler
         from app.handlers.reseller import create_user_safely
         from app.services.marzban import ownership_note
 
@@ -184,15 +207,17 @@ class MarzbanCreateSafetyFlowTests(unittest.IsolatedAsyncioTestCase):
             async def modify_user(self, username, payload):  # pragma: no cover - must not be called
                 calls.append(("modify_user", username))
 
+        reseller_handler.POST_CREATE_VERIFY_DELAY_SECONDS = 0
         ok, message, error, created = await create_user_safely(FakeClient(), {"username": "new_user"}, "reseller")
 
         self.assertTrue(ok)
         self.assertIsNone(message)
         self.assertIsNone(error)
         self.assertEqual(created["status"], "on_hold")
-        self.assertEqual([call[0] for call in calls], ["get_user", "create_user", "get_user"])
+        self.assertEqual([call[0] for call in calls], ["get_user", "create_user", "get_user", "get_user"])
 
-    async def test_create_user_safely_corrects_active_user(self):
+    async def test_create_user_safely_does_not_modify_active_user_after_create(self):
+        from app.handlers import reseller as reseller_handler
         from app.handlers.reseller import create_user_safely
         from app.services.marzban import MarzbanError, ownership_note
 
@@ -205,8 +230,6 @@ class MarzbanCreateSafetyFlowTests(unittest.IsolatedAsyncioTestCase):
                 self.gets += 1
                 if self.gets == 1:
                     raise MarzbanError("not found", 404)
-                if self.modified:
-                    return {"username": username, "status": "on_hold", "used_traffic": 0, "online": False, "expire": None, "note": ownership_note("reseller")}
                 return {"username": username, "status": "active", "used_traffic": 0, "online": False, "expire": 123, "note": ownership_note("reseller")}
 
             async def create_user(self, payload):
@@ -214,13 +237,12 @@ class MarzbanCreateSafetyFlowTests(unittest.IsolatedAsyncioTestCase):
 
             async def modify_user(self, username, payload):
                 self.modified = True
-                self.payload = payload
                 return {"ok": True}
 
         fake = FakeClient()
+        reseller_handler.POST_CREATE_VERIFY_DELAY_SECONDS = 0
         ok, _, _, created = await create_user_safely(fake, {"username": "new_user"}, "reseller")
 
         self.assertTrue(ok)
-        self.assertTrue(fake.modified)
-        self.assertEqual(fake.payload["status"], "on_hold")
-        self.assertEqual(created["status"], "on_hold")
+        self.assertFalse(fake.modified)
+        self.assertEqual(created["status"], "active")

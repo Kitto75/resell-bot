@@ -7,8 +7,7 @@ def dashboard() -> InlineKeyboardMarkup:
     ])
 
 
-def created_user_actions(username: str) -> InlineKeyboardMarkup:
+def created_user_actions() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="دریافت لینک اشتراک", callback_data=f"res:subscription:{username}")],
         [InlineKeyboardButton(text="داشبورد", callback_data="back")],
     ])
