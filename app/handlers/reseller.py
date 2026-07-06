@@ -4,7 +4,7 @@ import logging
 from decimal import Decimal, InvalidOperation
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from app.config import get_settings
 from app.database.models import OperationType, Reseller
 from app.database.repositories import InboundRepository, RechargeRepository
@@ -14,6 +14,7 @@ from app.keyboards.common import back_cancel, reseller_confirm
 from app.keyboards.reseller import created_user_actions, dashboard
 from app.services.billing import BYTES_PER_GB, BillingService
 from app.services.marzban import MarzbanClient, MarzbanError, create_payload_summary, extract_last_user_agent, on_hold_expire_duration, ownership_note, user_belongs_to_reseller
+from app.services.qr import make_subscription_qr_png
 from app.services.reports import operation_report
 from app.services.validators import valid_username
 from app.states.reseller import CreateUser, Recharge, RenewUser
@@ -42,6 +43,41 @@ async def fetch_marzban_user(marzban: MarzbanClient, username: str) -> dict | No
             return None
         logger.warning("Marzban fallback get_user failed username=%s status=%s", username, exc.status)
         raise
+
+
+
+def primary_subscription_url(user: dict | None) -> str | None:
+    if not isinstance(user, dict):
+        return None
+    for key in ("subscription_url", "subscription", "sub_url"):
+        value = user.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    subscriptions = user.get("subscription_urls") or user.get("subscriptions")
+    if isinstance(subscriptions, list):
+        for item in subscriptions:
+            if isinstance(item, str) and item.strip():
+                return item.strip()
+            if isinstance(item, dict):
+                value = item.get("url") or item.get("subscription_url")
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    return None
+
+
+async def send_create_success_to_reseller(cb: CallbackQuery, username: str, subscription_url: str | None) -> None:
+    if not subscription_url:
+        await cb.message.answer(
+            f"✅ اکانت با موفقیت ساخته شد.\n\n👤 نام کاربری:\n{username}\n\nلینک اشتراک در پاسخ مرزبان پیدا نشد؛ لطفاً از پنل Marzban بررسی کنید.",
+            reply_markup=created_user_actions(),
+        )
+        return
+    await cb.message.answer(
+        f"✅ اکانت با موفقیت ساخته شد.\n\n👤 نام کاربری:\n{username}\n\n🔗 لینک اشتراک:\n{subscription_url}\n\n📱 QR Code:\nکد زیر را با کلاینت VPN اسکن کنید.",
+        reply_markup=created_user_actions(),
+    )
+    qr_png = make_subscription_qr_png(subscription_url)
+    await cb.message.answer_photo(BufferedInputFile(qr_png, filename=f"{username}_subscription.png"))
 
 def _user_is_online(user: dict) -> bool:
     for key in ("online", "is_online"):
@@ -211,8 +247,7 @@ async def create_confirm(cb: CallbackQuery, state: FSMContext, reseller: Reselle
                 report = operation_report(db_reseller, log)
     if report:
         for admin_id in get_settings().admin_ids: await cb.bot.send_message(admin_id, report)
-    created_status = (created_user or {}).get("status", "on_hold")
-    await state.clear(); await cb.message.answer(f"✅ اکانت با موفقیت ساخته شد.\nنام کاربری: {username}\nوضعیت: {status_fa(created_status)}\nحجم: {format_bytes_to_gb(gb * BYTES_PER_GB)}\nمدت اعتبار پس از فعال‌سازی: {days} روز\nیادداشت: {ownership_note(reseller.display_name)}", reply_markup=created_user_actions()); await cb.answer()
+    await state.clear(); await send_create_success_to_reseller(cb, username, primary_subscription_url(created_user)); await cb.answer()
 
 @router.callback_query(F.data.startswith("res:subscription:"))
 async def subscription_link_warning(cb: CallbackQuery) -> None:
