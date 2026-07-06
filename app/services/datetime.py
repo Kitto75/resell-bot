@@ -11,3 +11,9 @@ def persian_date_time(tz_name: str = "Asia/Tehran") -> tuple[str, str]:
     now = tehran_now(tz_name)
     jalali = jdatetime.datetime.fromgregorian(datetime=now)
     return jalali.strftime("%Y/%m/%d"), jalali.strftime("%H:%M:%S")
+
+
+def jalali_filename_datetime(tz_name: str = "Asia/Tehran") -> str:
+    now = tehran_now(tz_name)
+    jalali = jdatetime.datetime.fromgregorian(datetime=now)
+    return jalali.strftime("%Y-%m-%d-%H-%M")

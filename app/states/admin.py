@@ -41,3 +41,6 @@ class AdminReseller(AddReseller):
     pass
 class RejectRecharge(StatesGroup):
     reason = State()
+
+class BackupSettings(StatesGroup):
+    interval = State()

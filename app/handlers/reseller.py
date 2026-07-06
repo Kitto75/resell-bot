@@ -4,7 +4,7 @@ import logging
 from decimal import Decimal, InvalidOperation
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.types import CallbackQuery, FSInputFile, Message
 from app.config import get_settings
 from app.database.models import OperationType, Reseller
 from app.database.repositories import InboundRepository, RechargeRepository
@@ -73,11 +73,19 @@ async def send_create_success_to_reseller(cb: CallbackQuery, username: str, subs
         )
         return
     await cb.message.answer(
-        f"✅ اکانت با موفقیت ساخته شد.\n\n👤 نام کاربری:\n{username}\n\n🔗 لینک اشتراک:\n{subscription_url}\n\n📱 QR Code:\nکد زیر را با کلاینت VPN اسکن کنید.",
+        f"✅ اکانت با موفقیت ساخته شد.\n\n👤 نام کاربری:\n{username}\n\n🔗 لینک اشتراک:\n{subscription_url}",
         reply_markup=created_user_actions(),
     )
-    qr_png = make_subscription_qr_png(subscription_url)
-    await cb.message.answer_photo(BufferedInputFile(qr_png, filename=f"{username}_subscription.png"))
+    qr_path = None
+    try:
+        qr_path = make_subscription_qr_png(subscription_url, username)
+        await cb.message.answer_photo(FSInputFile(qr_path, filename=f"{username}_subscription.png"), caption="📱 QR Code\nکد را با کلاینت VPN اسکن کنید.")
+    except Exception:
+        logger.exception("Failed to generate/send subscription QR username=%s", username)
+        await cb.message.answer("لینک اشتراک ارسال شد، اما ساخت QR Code ناموفق بود.")
+    finally:
+        if qr_path is not None:
+            qr_path.unlink(missing_ok=True)
 
 def _user_is_online(user: dict) -> bool:
     for key in ("online", "is_online"):
@@ -184,7 +192,7 @@ async def back_to_dashboard(cb: CallbackQuery, state: FSMContext, reseller: Rese
 @router.callback_query(F.data == "res:help")
 async def help_start(cb: CallbackQuery, reseller: Reseller | None) -> None:
     if reseller is None: await cb.answer("حساب ریسلری پیدا نشد.", show_alert=True); return
-    await cb.message.answer("راهنما\n• ساخت کاربر: ساخت اکانت مرزبان و کسر هزینه از موجودی.\n• تمدید کاربر: افزودن حجم و زمان به اکانت متعلق به شما.\n• درخواست شارژ: ارسال مبلغ و رسید برای مدیر.\nبرای خروج از فرم‌ها از دکمه‌های لغو یا برگشت استفاده کنید."); await cb.answer()
+    await cb.message.answer("راهنما\n• ساخت کاربر: ساخت اکانت و کسر هزینه از موجودی.\n• تمدید کاربر: افزودن حجم و زمان به اکانت متعلق به شما.\n• درخواست شارژ: ارسال مبلغ و رسید برای مدیر.\nبرای خروج از فرم‌ها از دکمه‌های لغو یا برگشت استفاده کنید."); await cb.answer()
 
 @router.callback_query(F.data == "cancel")
 async def cancel(cb: CallbackQuery, state: FSMContext) -> None:
@@ -247,7 +255,9 @@ async def create_confirm(cb: CallbackQuery, state: FSMContext, reseller: Reselle
                 report = operation_report(db_reseller, log)
     if report:
         for admin_id in get_settings().admin_ids: await cb.bot.send_message(admin_id, report)
-    await state.clear(); await send_create_success_to_reseller(cb, username, primary_subscription_url(created_user)); await cb.answer()
+    subscription_url = marzban.absolute_subscription_url(primary_subscription_url(created_user))
+    logger.info("Marzban subscription link resolved username=%s found=%s", username, bool(subscription_url))
+    await state.clear(); await send_create_success_to_reseller(cb, username, subscription_url); await cb.answer()
 
 @router.callback_query(F.data.startswith("res:subscription:"))
 async def subscription_link_warning(cb: CallbackQuery) -> None:
