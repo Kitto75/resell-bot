@@ -51,6 +51,141 @@ alembic upgrade head
 python run.py
 ```
 
+
+## اجرای ربات با systemd
+
+استفاده از `systemd` باعث می‌شود ربات به‌صورت خودکار در پس‌زمینه اجرا شود، اگر به هر دلیل کرش کرد دوباره راه‌اندازی شود و بعد از ری‌استارت شدن سرور نیز بدون نیاز به اجرای دستی دوباره شروع به کار کند. این روش برای اجرای دائمی ربات روی Ubuntu/Linux پیشنهاد می‌شود.
+
+> در مثال‌های زیر فرض شده پروژه در مسیر `/root/resell-bot` قرار دارد و با کاربر `root` اجرا می‌شود. اگر مسیر پروژه یا کاربر شما متفاوت است، همان مقدارها را در دستورها و فایل سرویس جایگزین کنید.
+
+1. ابتدا وارد پوشه پروژه شوید:
+
+```bash
+cd /root/resell-bot
+```
+
+2. مطمئن شوید محیط مجازی Python ساخته شده و وابستگی‌های پروژه نصب شده‌اند:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+3. قبل از ساخت سرویس، ربات را یک بار به‌صورت دستی تست کنید تا مطمئن شوید تنظیمات `.env`، اتصال به دیتابیس و اتصال به تلگرام درست هستند:
+
+```bash
+python3 run.py
+```
+
+اگر ربات بدون خطا اجرا شد، با کلیدهای `Ctrl + C` آن را متوقف کنید و مراحل بعدی را انجام دهید.
+
+4. فایل سرویس `systemd` را بسازید:
+
+```bash
+nano /etc/systemd/system/resell-bot.service
+```
+
+5. محتوای زیر را داخل فایل قرار دهید، سپس فایل را ذخیره کنید:
+
+```ini
+[Unit]
+Description=Resell Bot Telegram Service
+After=network.target
+
+[Service]
+WorkingDirectory=/root/resell-bot
+ExecStart=/root/resell-bot/.venv/bin/python /root/resell-bot/run.py
+Restart=always
+RestartSec=5
+User=root
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+```
+
+توضیح کوتاه گزینه‌های مهم:
+
+- `WorkingDirectory` مشخص می‌کند ربات از کدام پوشه اجرا شود؛ این گزینه برای پیدا شدن فایل‌هایی مثل `.env` و دیتابیس بسیار مهم است.
+- `ExecStart` مسیر Python داخل محیط مجازی و فایل اجرای ربات را مشخص می‌کند.
+- `Restart=always` باعث می‌شود اگر ربات متوقف یا کرش شد، دوباره اجرا شود.
+- `RestartSec=5` یعنی قبل از اجرای دوباره، ۵ ثانیه صبر کند.
+- `User=root` یعنی سرویس با کاربر `root` اجرا می‌شود. اگر پروژه را با کاربر دیگری نصب کرده‌اید، این مقدار را تغییر دهید.
+
+6. بعد از ساخت یا تغییر فایل سرویس، `systemd` را reload کنید:
+
+```bash
+systemctl daemon-reload
+```
+
+7. اجرای خودکار ربات بعد از روشن یا ری‌استارت شدن سرور را فعال کنید:
+
+```bash
+systemctl enable resell-bot
+```
+
+8. ربات را اجرا کنید:
+
+```bash
+systemctl start resell-bot
+```
+
+9. وضعیت سرویس را بررسی کنید:
+
+```bash
+systemctl status resell-bot
+```
+
+اگر وضعیت `active (running)` نمایش داده شد، یعنی ربات با موفقیت در پس‌زمینه اجرا شده است.
+
+10. برای دیدن لاگ‌های زنده ربات از دستور زیر استفاده کنید:
+
+```bash
+journalctl -u resell-bot -f
+```
+
+11. هر زمان بعد از تغییر تنظیمات یا به‌روزرسانی کد نیاز داشتید ربات را دوباره راه‌اندازی کنید:
+
+```bash
+systemctl restart resell-bot
+```
+
+12. برای توقف کامل ربات از دستور زیر استفاده کنید:
+
+```bash
+systemctl stop resell-bot
+```
+
+### خطاهای رایج systemd
+
+- اگر فایل `.env` لود نمی‌شود یا ربات تنظیمات را پیدا نمی‌کند، مطمئن شوید مقدار `WorkingDirectory` دقیقاً برابر مسیر پروژه است؛ برای مثال: `/root/resell-bot`.
+- اگر مسیر Python اشتباه است یا سرویس با خطای پیدا نشدن Python اجرا نمی‌شود، وجود فایل Python محیط مجازی را بررسی کنید:
+
+```bash
+ls /root/resell-bot/.venv/bin/python
+```
+
+- اگر وابستگی‌ها نصب نیستند یا خطای `ModuleNotFoundError` می‌بینید، محیط مجازی را فعال کنید و پکیج‌ها را دوباره نصب کنید:
+
+```bash
+source /root/resell-bot/.venv/bin/activate
+pip install -r requirements.txt
+```
+
+- اگر مسیر دیتابیس اشتباه است یا ربات دیتابیس را پیدا نمی‌کند، مقدار `DATABASE_URL` را در فایل `.env` بررسی کنید و مطمئن شوید مسیر دیتابیس با محل واقعی فایل هماهنگ است.
+- اگر ربات start نمی‌شود یا سریع متوقف می‌شود، ۱۰۰ خط آخر لاگ سرویس را ببینید:
+
+```bash
+journalctl -u resell-bot -n 100 --no-pager
+```
+
+بعد از رفع خطا، معمولاً لازم است سرویس را دوباره راه‌اندازی کنید:
+
+```bash
+systemctl restart resell-bot
+```
+
 ## بکاپ و بازیابی SQLite
 
 ربات به‌صورت پیش‌فرض از SQLite استفاده می‌کند. مقدار `DATABASE_URL` مشخص می‌کند فایل دیتابیس کجاست. اگر در `.env` نوشته باشید:
