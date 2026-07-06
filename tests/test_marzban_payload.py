@@ -246,3 +246,21 @@ class MarzbanCreateSafetyFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok)
         self.assertFalse(fake.modified)
         self.assertEqual(created["status"], "active")
+
+class MarzbanUserAgentExtractorTests(unittest.TestCase):
+    def test_no_connection_history_is_unknown(self):
+        from app.services.marzban import extract_last_user_agent
+        self.assertEqual(extract_last_user_agent({"username": "u", "ip": "1.2.3.4"}), "نامشخص")
+
+    def test_top_level_user_agent_exact(self):
+        from app.services.marzban import extract_last_user_agent
+        self.assertEqual(extract_last_user_agent({"user_agent": "Hiddify/2.0 Android"}), "Hiddify/2.0 Android")
+
+    def test_multiple_devices_uses_latest_timestamp(self):
+        from app.services.marzban import extract_last_user_agent
+        data = {"devices": [{"user_agent": "OldApp/1.0", "last_online": 10}, {"user_agent": "NewApp/2.0", "last_online": 20}]}
+        self.assertEqual(extract_last_user_agent(data), "NewApp/2.0")
+
+    def test_missing_and_unexpected_format_no_crash(self):
+        from app.services.marzban import extract_last_user_agent
+        self.assertEqual(extract_last_user_agent({"usages": ["bad", {"ip": "1.2.3.4"}], "links": ["https://example.test/sub"]}), "نامشخص")

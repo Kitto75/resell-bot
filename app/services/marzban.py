@@ -70,7 +70,31 @@ class MarzbanClient:
         return urljoin(f"{self.base_url}/", value.lstrip("/"))
     async def get_user(self, username: str) -> dict[str, Any]:
         if not self._token: await self.login()
-        return await self._request("GET", f"/api/user/{username}")
+        data = await self._request("GET", f"/api/user/{username}")
+        if isinstance(data, dict):
+            log_user_agent_debug(username, data)
+        return data
+    async def get_user_with_activity(self, username: str) -> dict[str, Any]:
+        data = await self.get_user(username)
+        if not isinstance(data, dict):
+            return data
+        # Marzban deployments differ; collect client/session details from optional endpoints when present.
+        for label, path in {
+            "usage_details": f"/api/user/{username}/usage",
+            "online_clients": f"/api/user/{username}/online_clients",
+            "statistics": f"/api/user/{username}/statistics",
+        }.items():
+            try:
+                extra = await self._request("GET", path)
+            except MarzbanError as exc:
+                if exc.status in {404, 405}:
+                    logger.debug("Marzban optional user-agent endpoint unavailable username=%s endpoint=%s status=%s", username, path, exc.status)
+                    continue
+                logger.warning("Marzban optional user-agent endpoint failed username=%s endpoint=%s status=%s", username, path, exc.status)
+                continue
+            data[label] = extra
+        log_user_agent_debug(username, data)
+        return data
     async def create_user(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not self._token: await self.login()
         sanitized_payload = prepare_create_payload(payload, payload.get("validity_days"))
@@ -201,22 +225,84 @@ def prepare_create_payload(payload: dict[str, Any], validity_days: int | None = 
     return prepared
 
 
-def extract_last_user_agent(user_data: dict[str, Any]) -> str:
-    for key in ("last_connected_user_agent", "last_user_agent", "user_agent", "last_connected_device", "last_connected", "last_online", "online_at"):
-        value = user_data.get(key)
+_UA_KEYS = ("last_connected_user_agent", "last_user_agent", "user_agent", "userAgent", "ua", "client_user_agent")
+_DEVICE_KEYS = ("app", "application", "client", "client_name", "client_version", "device", "device_name", "platform", "os")
+_TIME_KEYS = ("last_online", "online_at", "connected_at", "last_connected_at", "updated_at", "created_at", "time", "timestamp")
+_NON_UA_KEYS = {"username", "subscription", "subscription_url", "sub_url", "link", "links", "proxy", "protocol", "inbound", "inbound_tag", "ip", "ip_address", "address", "last_online", "online_at"}
+
+
+def _is_probable_user_agent(value: Any, key: str | None = None) -> bool:
+    text = str(value or "").strip()
+    if not text or (key and key in _NON_UA_KEYS):
+        return False
+    if text.startswith(("http://", "https://", "vmess://", "vless://", "trojan://", "ss://")):
+        return False
+    if text.count(".") == 3 and all(part.isdigit() for part in text.split(".")):
+        return False
+    return any(mark in text.lower() for mark in ("/", "android", "ios", "windows", "linux", "mac", "chrome", "firefox", "safari", "v2ray", "nekobox", "hiddify", "streisand", "sing-box", "clash"))
+
+
+def _timestamp_value(item: dict[str, Any]) -> float:
+    from datetime import datetime
+    for key in _TIME_KEYS:
+        value = item.get(key)
+        if isinstance(value, (int, float)):
+            return float(value)
         if isinstance(value, str) and value.strip():
+            try:
+                return float(value)
+            except ValueError:
+                try:
+                    return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+                except ValueError:
+                    continue
+    return 0.0
+
+
+def _extract_from_mapping(data: dict[str, Any]) -> str | None:
+    for key in _UA_KEYS:
+        value = data.get(key)
+        if isinstance(value, str) and _is_probable_user_agent(value, key):
             return value.strip()
         if isinstance(value, dict):
-            for nested in ("user_agent", "agent", "app", "device", "name"):
-                nested_value = value.get(nested)
-                if nested_value:
-                    return str(nested_value)
-    for key in ("devices", "usages"):
-        values = user_data.get(key)
-        if isinstance(values, list):
-            for item in reversed(values):
-                if isinstance(item, dict):
-                    found = extract_last_user_agent(item)
-                    if found != "نامشخص":
-                        return found
+            nested = _extract_from_mapping(value)
+            if nested:
+                return nested
+    parts = []
+    for key in _DEVICE_KEYS:
+        value = data.get(key)
+        if isinstance(value, str) and value.strip() and _is_probable_user_agent(value, key):
+            parts.append(value.strip())
+    if parts:
+        return " / ".join(dict.fromkeys(parts))
+    return None
+
+
+def log_user_agent_debug(username: str, user_data: dict[str, Any]) -> None:
+    interesting = {key: redact_secrets(user_data.get(key)) for key in ("user_agent", "last_user_agent", "last_connected_user_agent", "last_connected_device", "last_online", "online_at", "usages", "devices", "online_clients", "last_connected", "links", "sub_updated_at", "sessions", "clients", "usage", "statistics") if key in user_data}
+    logger.debug("Marzban user-agent fields username=%s fields=%s", username, interesting)
+
+
+def extract_last_user_agent(user_data: dict[str, Any]) -> str:
+    """Return latest real client/app User-Agent from a Marzban user payload."""
+    if not isinstance(user_data, dict):
+        return "نامشخص"
+    found = _extract_from_mapping(user_data)
+    if found:
+        return found
+    candidates: list[dict[str, Any]] = []
+    for key in ("usages", "devices", "online_clients", "last_connected", "sessions", "clients", "usage", "statistics", "usage_details"):
+        value = user_data.get(key)
+        if isinstance(value, dict):
+            candidates.append(value)
+            candidates.extend(item for item in value.values() if isinstance(item, dict))
+            for item in value.values():
+                if isinstance(item, list):
+                    candidates.extend(x for x in item if isinstance(x, dict))
+        elif isinstance(value, list):
+            candidates.extend(item for item in value if isinstance(item, dict))
+    for item in sorted(candidates, key=_timestamp_value, reverse=True):
+        found = _extract_from_mapping(item)
+        if found:
+            return found
     return "نامشخص"

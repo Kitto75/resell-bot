@@ -300,3 +300,38 @@ systemctl start reseller-bot
 - مطمئن شوید `expire` بعد از ساخت اکانت `on_hold` فعال نشده است.
 - مطمئن شوید ربات بعد از ساخت، لینک اشتراک را از پاسخ/اطلاعات کاربر مرزبان استخراج و برای ریسلر ارسال می‌کند.
 - مطمئن شوید QR Code لینک اشتراک برای ریسلر ارسال می‌شود و مدیر فقط گزارش عملیات را دریافت می‌کند.
+
+## Multiple Telegram IDs per reseller
+
+Each reseller is one business account with one balance, one price per GB, one inbound permission set, one transaction history, one display name, and one ownership note. A reseller can now link multiple numeric Telegram IDs to that same account through the admin bot UI.
+
+Admin management buttons:
+
+- `👥 اکانت‌های تلگرام ریسلر` shows the Telegram IDs linked to a reseller.
+- `➕ افزودن آیدی تلگرام` links another Telegram numeric ID to the selected reseller.
+- `➖ حذف آیدی تلگرام` removes a linked Telegram ID, but the bot prevents removing the last ID.
+- `⭐ تنظیم به عنوان اصلی` marks one linked ID as the primary Telegram ID.
+
+Telegram ID ownership is globally unique: one Telegram ID cannot be linked to more than one reseller. All linked IDs open the same reseller dashboard and spend from the same shared balance. Created users and renewals remain owned by the reseller display name, so the Marzban note continues to be:
+
+```text
+belongs to reseller-name
+```
+
+Reports include the reseller display name, the Telegram ID that performed the action, and the primary Telegram ID when available.
+
+## Last app / User-Agent display
+
+When a reseller checks user info during renewal, the bot displays the latest detected client/app User-Agent as:
+
+```text
+آخرین برنامه / User-Agent: ...
+```
+
+If Marzban has no usable client/app/version information, the bot safely displays:
+
+```text
+آخرین برنامه / User-Agent: نامشخص
+```
+
+The extractor ignores subscription links, usernames, proxy/inbound names, and IP-only values so they are not confused with a real app/client version.

@@ -78,6 +78,7 @@ def resellers_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="➕ افزودن ریسلر", callback_data="adm:add_reseller")],
         [InlineKeyboardButton(text="✏️ ویرایش ریسلر", callback_data="adm:edit_reseller")],
         [InlineKeyboardButton(text="💰 ویرایش موجودی", callback_data="adm:balance")],
+        [InlineKeyboardButton(text="👥 اکانت‌های تلگرام ریسلر", callback_data="adm:tg_accounts")],
         [InlineKeyboardButton(text="⬅️ برگشت", callback_data="adm:panel"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")],
     ])
 
@@ -127,3 +128,17 @@ def backup_keyboard(enabled: bool) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="دریافت بکاپ الان", callback_data="adm:backup:now")],
         [InlineKeyboardButton(text="برگشت", callback_data="adm:panel")],
     ])
+
+
+def telegram_accounts_actions(reseller_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ افزودن آیدی تلگرام", callback_data=f"adm:tg:add:{reseller_id}")],
+        [InlineKeyboardButton(text="➖ حذف آیدی تلگرام", callback_data=f"adm:tg:remove:{reseller_id}")],
+        [InlineKeyboardButton(text="⭐ تنظیم به عنوان اصلی", callback_data=f"adm:tg:primary:{reseller_id}")],
+        [InlineKeyboardButton(text="⬅️ برگشت", callback_data="adm:resellers"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")],
+    ])
+
+def telegram_account_keyboard(accounts, action: str, back_reseller_id: int) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text=f"{'⭐ ' if account.is_primary else ''}{account.telegram_id}", callback_data=f"adm:tg:{action}:acct:{account.id}")] for account in accounts]
+    rows.append([InlineKeyboardButton(text="⬅️ برگشت", callback_data=f"adm:tgsel:{back_reseller_id}"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
