@@ -7,6 +7,7 @@ logger = logging.getLogger(__name__)
 
 _SECRET_KEYS = {"token", "access_token", "authorization", "password", "passwd", "secret", "api_key", "apikey"}
 _INTERNAL_CREATE_KEYS = {"validity_days"}
+_SAFE_CREATE_KEYS = {"username", "status", "data_limit", "on_hold_expire_duration", "proxies", "inbounds", "data_limit_reset_strategy", "note"}
 _ON_HOLD_ACTIVATION_KEYS = {"expire", "on_hold_timeout", "on_hold_timeout_duration", "activation_deadline", "activate_at", "active_at"}
 
 class MarzbanError(RuntimeError):
@@ -171,7 +172,10 @@ def create_payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def prepare_create_payload(payload: dict[str, Any], validity_days: int | None = None) -> dict[str, Any]:
-    prepared = {key: value for key, value in payload.items() if key not in _INTERNAL_CREATE_KEYS}
+    dropped_keys = sorted(key for key in payload if key not in _SAFE_CREATE_KEYS and key not in _INTERNAL_CREATE_KEYS)
+    if dropped_keys:
+        logger.warning("Dropping unsafe Marzban create-user payload keys username=%s keys=%s", payload.get("username"), dropped_keys)
+    prepared = {key: value for key, value in payload.items() if key in _SAFE_CREATE_KEYS}
     prepared.setdefault("data_limit_reset_strategy", "no_reset")
     if not isinstance(prepared.get("proxies"), dict) or not prepared.get("proxies"):
         raise ValueError("Marzban create-user payload requires non-empty proxies")
