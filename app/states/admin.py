@@ -64,3 +64,18 @@ class AdminRenewMarzbanUser(StatesGroup):
     gb = State()
     days = State()
     confirm = State()
+
+
+class AdminDisableMarzbanUser(StatesGroup):
+    username = State()
+    confirm = State()
+
+
+class AdminEnableMarzbanUser(StatesGroup):
+    username = State()
+    confirm = State()
+
+
+class AdminDeleteMarzbanUser(StatesGroup):
+    username = State()
+    confirm = State()
