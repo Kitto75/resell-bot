@@ -225,21 +225,65 @@ def prepare_create_payload(payload: dict[str, Any], validity_days: int | None = 
     return prepared
 
 
-_UA_KEYS = ("last_connected_user_agent", "last_user_agent", "user_agent", "userAgent", "ua", "client_user_agent")
-_DEVICE_KEYS = ("app", "application", "client", "client_name", "client_version", "device", "device_name", "platform", "os")
-_TIME_KEYS = ("last_online", "online_at", "connected_at", "last_connected_at", "updated_at", "created_at", "time", "timestamp")
-_NON_UA_KEYS = {"username", "subscription", "subscription_url", "sub_url", "link", "links", "proxy", "protocol", "inbound", "inbound_tag", "ip", "ip_address", "address", "last_online", "online_at"}
+_UA_KEYS = (
+    "last_connected_user_agent", "last_user_agent", "user_agent", "userAgent", "user_agent_string",
+    "userAgentString", "ua", "client_user_agent", "clientUserAgent", "client_ua", "app_user_agent",
+)
+_DEVICE_KEYS = (
+    "app", "application", "app_name", "app_version", "client", "client_name", "client_version",
+    "client_type", "device", "device_name", "device_model", "platform", "os", "browser",
+    "last_connected_device", "last_connected_client", "last_connected_app",
+)
+_ACTIVITY_KEYS = (
+    "usages", "usage", "usage_details", "devices", "device", "online_clients", "online_client",
+    "last_connected", "sessions", "session", "clients", "client", "statistics", "stats", "user_stats",
+)
+_TIME_KEYS = ("last_online", "online_at", "connected_at", "last_connected_at", "updated_at", "created_at", "time", "timestamp", "date")
+_NON_UA_KEYS = {
+    "username", "name", "email", "note", "subscription", "subscription_url", "subscription_path", "sub_url",
+    "subscription_urls", "subscriptions", "link", "links", "proxy", "proxies", "protocol", "inbound",
+    "inbounds", "inbound_tag", "inbound_tags", "tag", "remark", "ip", "ip_address", "address", "host",
+    "last_online", "online_at", "port", "uuid", "id", "password",
+}
+_PROTOCOL_NAMES = {"vmess", "vless", "trojan", "shadowsocks", "ss", "http", "https", "socks", "socks5", "wireguard"}
+_UA_MARKERS = ("/", "android", "ios", "iphone", "ipad", "windows", "linux", "mac", "chrome", "firefox", "safari", "v2ray", "nekobox", "hiddify", "streisand", "sing-box", "singbox", "clash", "xray", "foxray", "fair", "napsternet", "nekoray", "v2box", "karing")
+
+
+def _looks_like_url_or_proxy(value: str) -> bool:
+    lowered = value.lower()
+    return lowered.startswith(("http://", "https://", "vmess://", "vless://", "trojan://", "ss://", "ssr://", "socks://", "socks5://")) or "://" in lowered
+
+
+def _looks_like_ip(value: str) -> bool:
+    import ipaddress
+    try:
+        ipaddress.ip_address(value.strip("[]"))
+        return True
+    except ValueError:
+        return False
 
 
 def _is_probable_user_agent(value: Any, key: str | None = None) -> bool:
     text = str(value or "").strip()
-    if not text or (key and key in _NON_UA_KEYS):
+    normalized_key = str(key or "").strip()
+    lowered = text.lower()
+    if not text or (normalized_key and normalized_key in _NON_UA_KEYS):
         return False
-    if text.startswith(("http://", "https://", "vmess://", "vless://", "trojan://", "ss://")):
+    if _looks_like_url_or_proxy(text) or _looks_like_ip(text):
         return False
-    if text.count(".") == 3 and all(part.isdigit() for part in text.split(".")):
+    if lowered in _PROTOCOL_NAMES:
         return False
-    return any(mark in text.lower() for mark in ("/", "android", "ios", "windows", "linux", "mac", "chrome", "firefox", "safari", "v2ray", "nekobox", "hiddify", "streisand", "sing-box", "clash"))
+    # User-Agent-specific fields are trusted after rejecting obvious secrets, links, protocols and IPs.
+    if normalized_key in _UA_KEYS:
+        return len(text) >= 2
+    # App/client/device fields often contain just an app name such as "Hiddify" or "v2rayNG".
+    if normalized_key in _DEVICE_KEYS:
+        if any(mark in lowered for mark in _UA_MARKERS):
+            return True
+        if normalized_key.endswith("version") and any(ch.isdigit() for ch in text):
+            return True
+        return bool(any(ch.isalpha() for ch in text) and not any(sep in text for sep in ("://", "@")))
+    return any(mark in lowered for mark in _UA_MARKERS)
 
 
 def _timestamp_value(item: dict[str, Any]) -> float:
@@ -278,8 +322,46 @@ def _extract_from_mapping(data: dict[str, Any]) -> str | None:
     return None
 
 
+def _collect_activity_mappings(value: Any, *, parent_key: str | None = None) -> list[dict[str, Any]]:
+    """Collect nested Marzban activity/client dicts without treating links or proxy config as clients."""
+    if isinstance(value, dict):
+        items = [value] if parent_key in _ACTIVITY_KEYS or any(key in value for key in (*_UA_KEYS, *_DEVICE_KEYS)) else []
+        for key, child in value.items():
+            key_text = str(key)
+            if key_text in {"links", "subscription_urls", "subscriptions", "proxies", "inbounds"}:
+                continue
+            if key_text in _ACTIVITY_KEYS or isinstance(child, (dict, list)):
+                items.extend(_collect_activity_mappings(child, parent_key=key_text))
+        return items
+    if isinstance(value, list):
+        items: list[dict[str, Any]] = []
+        for child in value:
+            items.extend(_collect_activity_mappings(child, parent_key=parent_key))
+        return items
+    return []
+
+
+def redact_user_agent_debug_fields(value: Any) -> Any:
+    """Redact secrets and link-like values before logging Marzban payload snippets."""
+    if isinstance(value, dict):
+        redacted = {}
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if lowered in _SECRET_KEYS or lowered in {"links", "link", "subscription", "subscription_url", "sub_url", "subscription_urls", "subscriptions"}:
+                redacted[key] = "***"
+            else:
+                redacted[key] = redact_user_agent_debug_fields(item)
+        return redacted
+    if isinstance(value, list):
+        return [redact_user_agent_debug_fields(item) for item in value]
+    if isinstance(value, str) and _looks_like_url_or_proxy(value):
+        return "***"
+    return value
+
+
 def log_user_agent_debug(username: str, user_data: dict[str, Any]) -> None:
-    interesting = {key: redact_secrets(user_data.get(key)) for key in ("user_agent", "last_user_agent", "last_connected_user_agent", "last_connected_device", "last_online", "online_at", "usages", "devices", "online_clients", "last_connected", "links", "sub_updated_at", "sessions", "clients", "usage", "statistics") if key in user_data}
+    interesting_keys = (*_UA_KEYS, *_DEVICE_KEYS, *_TIME_KEYS, *_ACTIVITY_KEYS, "links", "subscription_url", "subscription", "sub_url", "configs")
+    interesting = {key: redact_user_agent_debug_fields(user_data.get(key)) for key in interesting_keys if key in user_data}
     logger.debug("Marzban user-agent fields username=%s fields=%s", username, interesting)
 
 
@@ -287,21 +369,19 @@ def extract_last_user_agent(user_data: dict[str, Any]) -> str:
     """Return latest real client/app User-Agent from a Marzban user payload."""
     if not isinstance(user_data, dict):
         return "نامشخص"
+
+    candidates = _collect_activity_mappings(user_data)
+    if any(_timestamp_value(item) > 0 for item in candidates):
+        for item in sorted(candidates, key=_timestamp_value, reverse=True):
+            found = _extract_from_mapping(item)
+            if found:
+                return found
+
     found = _extract_from_mapping(user_data)
     if found:
         return found
-    candidates: list[dict[str, Any]] = []
-    for key in ("usages", "devices", "online_clients", "last_connected", "sessions", "clients", "usage", "statistics", "usage_details"):
-        value = user_data.get(key)
-        if isinstance(value, dict):
-            candidates.append(value)
-            candidates.extend(item for item in value.values() if isinstance(item, dict))
-            for item in value.values():
-                if isinstance(item, list):
-                    candidates.extend(x for x in item if isinstance(x, dict))
-        elif isinstance(value, list):
-            candidates.extend(item for item in value if isinstance(item, dict))
-    for item in sorted(candidates, key=_timestamp_value, reverse=True):
+
+    for item in candidates:
         found = _extract_from_mapping(item)
         if found:
             return found

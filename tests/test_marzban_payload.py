@@ -264,3 +264,39 @@ class MarzbanUserAgentExtractorTests(unittest.TestCase):
     def test_missing_and_unexpected_format_no_crash(self):
         from app.services.marzban import extract_last_user_agent
         self.assertEqual(extract_last_user_agent({"usages": ["bad", {"ip": "1.2.3.4"}], "links": ["https://example.test/sub"]}), "نامشخص")
+
+    def test_direct_last_user_agent(self):
+        from app.services.marzban import extract_last_user_agent
+        self.assertEqual(extract_last_user_agent({"last_user_agent": "v2rayNG/1.8.19 Android"}), "v2rayNG/1.8.19 Android")
+
+    def test_nested_online_clients_dict_uses_latest_timestamp(self):
+        from app.services.marzban import extract_last_user_agent
+        data = {
+            "online_clients": {
+                "1.2.3.4": {"ip": "1.2.3.4", "app": "OldApp", "last_online": 100},
+                "5.6.7.8": {"ip": "5.6.7.8", "user_agent": "Hiddify/2.5 iOS", "last_online": 200},
+            }
+        }
+        self.assertEqual(extract_last_user_agent(data), "Hiddify/2.5 iOS")
+
+    def test_nested_usages_app_device_fields(self):
+        from app.services.marzban import extract_last_user_agent
+        data = {"usages": {"vless-in": [{"device": "Android", "client_name": "v2rayNG", "updated_at": "2026-07-07T10:00:00Z"}]}}
+        self.assertEqual(extract_last_user_agent(data), "v2rayNG / Android")
+
+    def test_nested_sessions_client_fields(self):
+        from app.services.marzban import extract_last_user_agent
+        data = {"sessions": [{"client": {"app_name": "NekoBox", "app_version": "1.3.4"}, "connected_at": 12345}]}
+        self.assertEqual(extract_last_user_agent(data), "NekoBox / 1.3.4")
+
+    def test_rejects_subscription_links_protocols_usernames_and_ips(self):
+        from app.services.marzban import extract_last_user_agent
+        bad_values = [
+            {"last_user_agent": "https://example.test/sub/u"},
+            {"online_clients": [{"client": "vless", "ip": "192.0.2.1"}]},
+            {"usages": {"vless": [{"user_agent": "203.0.113.9"}]}},
+            {"sessions": [{"username": "alice", "link": "vmess://secret"}]},
+        ]
+        for payload in bad_values:
+            with self.subTest(payload=payload):
+                self.assertEqual(extract_last_user_agent(payload), "نامشخص")
