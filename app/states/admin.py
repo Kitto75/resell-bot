@@ -79,3 +79,9 @@ class AdminEnableMarzbanUser(StatesGroup):
 class AdminDeleteMarzbanUser(StatesGroup):
     username = State()
     confirm = State()
+
+
+class AdminResellerUsers(StatesGroup):
+    select_reseller = State()
+    browse = State()
+    user = State()
