@@ -5,3 +5,6 @@ class RenewUser(StatesGroup):
     username = State(); confirm_user = State(); gb = State(); days = State(); confirm = State()
 class Recharge(StatesGroup):
     amount = State(); receipt = State()
+
+class ToggleUserStatus(StatesGroup):
+    username = State(); confirm = State()
