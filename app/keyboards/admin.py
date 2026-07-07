@@ -5,6 +5,7 @@ from app.database.models import Reseller, TransactionType
 def panel() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 مدیریت ریسلرها", callback_data="adm:resellers"), InlineKeyboardButton(text="➕ افزودن ریسلر", callback_data="adm:add_reseller")],
+        [InlineKeyboardButton(text="➕ ساخت کاربر مرزبان", callback_data="adm:mb:create"), InlineKeyboardButton(text="♻️ تمدید کاربر مرزبان", callback_data="adm:mb:renew")],
         [InlineKeyboardButton(text="🧾 تراکنش‌ها", callback_data="adm:tx"), InlineKeyboardButton(text="🌐 اینباندها", callback_data="adm:inbounds")],
         [InlineKeyboardButton(text="🛠 حالت تعمیرات", callback_data="adm:maintenance"), InlineKeyboardButton(text="💾 بکاپ", callback_data="adm:backup")],
     ])

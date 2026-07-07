@@ -4,18 +4,20 @@ import logging
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, FSInputFile, Message
 from sqlalchemy.exc import IntegrityError
 from app.config import get_settings
 from app.database.models import RechargeStatus, ResellerStatus, TransactionType
 from app.database.repositories import InboundRepository, RechargeRepository, ResellerRepository, SettingsRepository, TransactionRepository
 from app.database.session import SessionLocal
 from app.keyboards.admin import admin_back_cancel, backup_keyboard, balance_action_keyboard, confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_reject_keyboard, resellers_keyboard, resellers_menu, status_keyboard, telegram_account_keyboard, telegram_accounts_actions, tx_filter_keyboard, tx_page_keyboard
+from app.services.qr import make_subscription_qr_png
+from app.services.validators import valid_username
 from app.services.backup import get_backup_status, send_database_backup, set_backup_enabled, set_backup_interval, sqlite_backup_supported
-from app.services.billing import BillingService
-from app.services.marzban import MarzbanClient, MarzbanError
-from app.utils.formatting import format_toman, status_fa
-from app.states.admin import AddReseller, BackupSettings, BalanceEdit, EditReseller, InboundPermissions, MaintenanceMode, RechargeModeration, TelegramAccountManagement, TransactionBrowsing
+from app.services.billing import BYTES_PER_GB, BillingService
+from app.services.marzban import MarzbanClient, MarzbanError, create_payload_summary, extract_last_user_agent, on_hold_expire_duration
+from app.utils.formatting import format_bytes_to_gb, format_remaining_time, format_toman, status_fa
+from app.states.admin import AddReseller, AdminCreateMarzbanUser, AdminRenewMarzbanUser, BackupSettings, BalanceEdit, EditReseller, InboundPermissions, MaintenanceMode, RechargeModeration, TelegramAccountManagement, TransactionBrowsing
 
 router = Router()
 PAGE_SIZE = 5
@@ -29,6 +31,65 @@ def money(text: str | None) -> Decimal | None:
     try: value = Decimal((text or '').strip())
     except InvalidOperation: return None
     return value if value >= 0 else None
+
+
+
+def _primary_subscription_url(user: dict | None) -> str | None:
+    if not isinstance(user, dict):
+        return None
+    for key in ("subscription_url", "subscription", "sub_url"):
+        value = user.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for key in ("subscription_urls", "subscriptions"):
+        value = user.get(key)
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, str) and item.strip():
+                    return item.strip()
+                if isinstance(item, dict):
+                    url = item.get("url") or item.get("subscription_url")
+                    if isinstance(url, str) and url.strip():
+                        return url.strip()
+    return None
+
+
+async def _send_admin_create_success(message: Message, username: str, subscription_url: str | None) -> None:
+    if not subscription_url:
+        await message.answer(
+            f"✅ کاربر مرزبان با موفقیت ساخته شد.\n\n👤 نام کاربری:\n{username}\n\nلینک اشتراک در پاسخ مرزبان پیدا نشد؛ لطفاً از پنل Marzban بررسی کنید.",
+            reply_markup=panel(),
+        )
+        return
+    await message.answer(
+        f"✅ کاربر مرزبان با موفقیت ساخته شد.\n\n👤 نام کاربری:\n{username}\n\n🔗 لینک اشتراک:\n{subscription_url}",
+        reply_markup=panel(),
+    )
+    qr_path = None
+    try:
+        qr_path = make_subscription_qr_png(subscription_url, username)
+        await message.answer_photo(FSInputFile(qr_path, filename=f"{username}_subscription.png"), caption="📱 QR Code\nکد را با کلاینت VPN اسکن کنید.")
+    except Exception:
+        logger.exception("Failed to generate/send admin subscription QR username=%s", username)
+        await message.answer("لینک اشتراک ارسال شد، اما ساخت QR Code ناموفق بود.")
+    finally:
+        if qr_path is not None:
+            qr_path.unlink(missing_ok=True)
+
+
+def _admin_user_info_text(info: dict) -> str:
+    limit = int(info.get("data_limit") or 0)
+    used = int(info.get("used_traffic") or 0)
+    return (
+        f"اطلاعات اکانت مرزبان\n"
+        f"نام کاربری: {info.get('username') or 'نامشخص'}\n"
+        f"حجم کل: {format_bytes_to_gb(limit)}\n"
+        f"مصرف‌شده: {format_bytes_to_gb(used)}\n"
+        f"باقی‌مانده: {format_bytes_to_gb(max(0, limit-used))}\n"
+        f"زمان باقی‌مانده: {format_remaining_time(info.get('expire'), info.get('remaining_seconds'), info.get('remaining_days'))}\n"
+        f"وضعیت: {status_fa(info.get('status'))}\n"
+        f"آخرین برنامه / User-Agent: {extract_last_user_agent(info)}"
+    )
 
 async def show_panel(message: Message) -> None:
     await message.answer("پنل مدیریت\nیک گزینه را انتخاب کنید.", reply_markup=panel())
@@ -112,6 +173,132 @@ async def backup_now_cb(cb: CallbackQuery, is_admin: bool) -> None:
 async def panel_cb(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
     if not is_admin: await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
     await state.clear(); await show_panel(cb.message); await cb.answer()
+
+
+@router.callback_query(F.data == "adm:mb:create")
+async def admin_create_marzban_start(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    await state.clear(); await state.set_state(AdminCreateMarzbanUser.username)
+    await cb.message.answer("ساخت کاربر مرزبان توسط مدیر\nنام کاربری را وارد کنید:", reply_markup=admin_back_cancel()); await cb.answer()
+
+
+@router.message(AdminCreateMarzbanUser.username)
+async def admin_create_marzban_username(message: Message, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    username = (message.text or "").strip()
+    if not valid_username(username):
+        await message.answer("نام کاربری نامعتبر است. فقط حروف کوچک انگلیسی، عدد و زیرخط مجاز است."); return
+    await state.update_data(username=username); await state.set_state(AdminCreateMarzbanUser.gb)
+    await message.answer("حجم را به گیگابایت وارد کنید:", reply_markup=admin_back_cancel("adm:mb:create"))
+
+
+@router.message(AdminCreateMarzbanUser.gb)
+async def admin_create_marzban_gb(message: Message, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    try: gb = int(message.text or "")
+    except ValueError: await message.answer("یک عدد صحیح معتبر وارد کنید."); return
+    if gb <= 0: await message.answer("حجم باید بیشتر از صفر باشد."); return
+    await state.update_data(gb=gb); await state.set_state(AdminCreateMarzbanUser.days)
+    await message.answer("مدت اعتبار را به روز وارد کنید:", reply_markup=admin_back_cancel("adm:mb:create"))
+
+
+@router.message(AdminCreateMarzbanUser.days)
+async def admin_create_marzban_days(message: Message, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    try: days = int(message.text or "")
+    except ValueError: await message.answer("یک عدد صحیح معتبر وارد کنید."); return
+    if days <= 0: await message.answer("مدت اعتبار باید بیشتر از صفر باشد."); return
+    data = await state.update_data(days=days); await state.set_state(AdminCreateMarzbanUser.confirm)
+    await message.answer(
+        f"خلاصه ساخت کاربر مرزبان توسط مدیر\nنام کاربری: {data['username']}\nحجم: {data['gb']} گیگابایت\nمدت اعتبار پس از فعال‌سازی: {days} روز\nوضعیت اولیه: در انتظار اتصال\nهزینه/کسر موجودی: ندارد\nآیا تایید می‌کنید؟",
+        reply_markup=confirm_keyboard("adm:mb:create:confirm", "adm:mb:create"),
+    )
+
+
+@router.callback_query(AdminCreateMarzbanUser.confirm, F.data == "adm:mb:create:confirm")
+async def admin_create_marzban_confirm(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    data = await state.get_data(); username = data["username"]; gb = int(data["gb"]); days = int(data["days"])
+    marzban = client()
+    payload = {"username": username, "status": "on_hold", "data_limit": gb * BYTES_PER_GB, "on_hold_expire_duration": on_hold_expire_duration(days), "validity_days": days, "note": f"created by admin {cb.from_user.id}"}
+    try:
+        try:
+            await marzban.get_user(username)
+            await cb.message.answer("این نام کاربری از قبل در مرزبان وجود دارد. لطفاً نام دیگری انتخاب کنید.", reply_markup=panel()); await state.clear(); await cb.answer(); return
+        except MarzbanError as exc:
+            if exc.status != 404: raise
+        payload = await marzban.build_create_payload(payload)
+        logger.info("Admin Marzban create sanitized payload summary=%s", create_payload_summary(payload))
+        await marzban.create_user(payload)
+        created_user = await marzban.get_user(username)
+    except (MarzbanError, ValueError) as exc:
+        logger.exception("Admin Marzban create failed username=%s payload_summary=%s", username, create_payload_summary(payload))
+        await cb.message.answer("ساخت کاربر در مرزبان ناموفق بود. جزئیات امن خطا در لاگ ثبت شد.", reply_markup=panel()); await state.clear(); await cb.answer(); return
+    subscription_url = marzban.absolute_subscription_url(_primary_subscription_url(created_user))
+    await state.clear(); await _send_admin_create_success(cb.message, username, subscription_url); await cb.answer()
+
+
+@router.callback_query(F.data == "adm:mb:renew")
+async def admin_renew_marzban_start(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    await state.clear(); await state.set_state(AdminRenewMarzbanUser.username)
+    await cb.message.answer("تمدید کاربر مرزبان توسط مدیر\nنام کاربری اکانت را وارد کنید:", reply_markup=admin_back_cancel()); await cb.answer()
+
+
+@router.message(AdminRenewMarzbanUser.username)
+async def admin_renew_marzban_username(message: Message, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    username = (message.text or "").strip()
+    try: info = await client().get_user_with_activity(username)
+    except MarzbanError:
+        logger.exception("Admin Marzban renew fetch failed username=%s", username)
+        await message.answer("دریافت اطلاعات کاربر از مرزبان ممکن نشد. نام کاربری یا لاگ‌ها را بررسی کنید."); return
+    await state.update_data(username=username, info=info); await state.set_state(AdminRenewMarzbanUser.confirm_user)
+    await message.answer(_admin_user_info_text(info), reply_markup=confirm_keyboard("adm:mb:renew:user_confirm", "adm:mb:renew"))
+
+
+@router.callback_query(AdminRenewMarzbanUser.confirm_user, F.data == "adm:mb:renew:user_confirm")
+async def admin_renew_marzban_confirm_user(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    await state.set_state(AdminRenewMarzbanUser.gb); await cb.message.answer("حجم اضافه را به گیگابایت وارد کنید:", reply_markup=admin_back_cancel("adm:mb:renew")); await cb.answer()
+
+
+@router.message(AdminRenewMarzbanUser.gb)
+async def admin_renew_marzban_gb(message: Message, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    try: gb = int(message.text or "")
+    except ValueError: await message.answer("یک عدد معتبر وارد کنید."); return
+    if gb <= 0: await message.answer("حجم باید بیشتر از صفر باشد."); return
+    await state.update_data(gb=gb); await state.set_state(AdminRenewMarzbanUser.days)
+    await message.answer("روزهای اضافه را وارد کنید:", reply_markup=admin_back_cancel("adm:mb:renew"))
+
+
+@router.message(AdminRenewMarzbanUser.days)
+async def admin_renew_marzban_days(message: Message, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    try: days = int(message.text or "")
+    except ValueError: await message.answer("یک عدد معتبر وارد کنید."); return
+    if days <= 0: await message.answer("روز باید بیشتر از صفر باشد."); return
+    data = await state.update_data(days=days); await state.set_state(AdminRenewMarzbanUser.confirm)
+    await message.answer(f"خلاصه تمدید توسط مدیر\nنام کاربری: {data['username']}\nحجم اضافه: {data['gb']} گیگابایت\nزمان اضافه: {days} روز\nهزینه/کسر موجودی: ندارد\nآیا تمدید تایید شود؟", reply_markup=confirm_keyboard("adm:mb:renew:confirm", "adm:mb:renew"))
+
+
+@router.callback_query(AdminRenewMarzbanUser.confirm, F.data == "adm:mb:renew:confirm")
+async def admin_renew_marzban_confirm(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    data = await state.get_data(); username = data["username"]; gb = int(data["gb"]); days = int(data["days"])
+    marzban = client()
+    try:
+        user = await marzban.get_user(username)
+        base_expire = max(int(user.get("expire") or 0), int(datetime.now(timezone.utc).timestamp()))
+        await marzban.modify_user(username, {"data_limit": int(user.get("data_limit") or 0) + gb * BYTES_PER_GB, "expire": base_expire + days * 86400})
+    except MarzbanError:
+        logger.exception("Admin Marzban renew failed username=%s gb=%s days=%s", username, gb, days)
+        await cb.message.answer("تمدید کاربر در مرزبان ناموفق بود. جزئیات امن خطا در لاگ ثبت شد.", reply_markup=panel()); await state.clear(); await cb.answer(); return
+    await state.clear(); await cb.message.answer("✅ اکانت مرزبان با موفقیت تمدید شد. هیچ موجودی ریسلری تغییر نکرد.", reply_markup=panel()); await cb.answer()
+
 
 @router.callback_query(F.data == "adm:cancel")
 async def cancel(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
