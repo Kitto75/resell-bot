@@ -102,6 +102,29 @@ class MarzbanCreateUserTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(captured["retry_5xx"])
         self.assertEqual(captured["json"]["username"], "u")
 
+    async def test_admin_user_management_methods_use_expected_endpoints_and_payloads(self):
+        from app.services.marzban import MarzbanClient
+
+        calls = []
+
+        class FakeClient(MarzbanClient):
+            async def login(self):
+                self._token = "token"
+
+            async def _request(self, method, path, *, retry_5xx=True, **kwargs):
+                calls.append((method, path, kwargs.get("json")))
+                return {"ok": True}
+
+        client = FakeClient("https://example.test", "admin", "pass")
+
+        await client.disable_user("u")
+        await client.enable_user("u")
+        await client.delete_user("u")
+
+        self.assertEqual(calls[0], ("PUT", "/api/user/u", {"status": "disabled"}))
+        self.assertEqual(calls[1], ("PUT", "/api/user/u", {"status": "active"}))
+        self.assertEqual(calls[2], ("DELETE", "/api/user/u", None))
+
 
 class MarzbanTemplateTests(unittest.IsolatedAsyncioTestCase):
     async def test_build_create_payload_uses_existing_user_template(self):
