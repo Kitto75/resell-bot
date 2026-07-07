@@ -49,3 +49,18 @@ class BackupSettings(StatesGroup):
 class TelegramAccountManagement(StatesGroup):
     select_reseller = State()
     add = State()
+
+
+class AdminCreateMarzbanUser(StatesGroup):
+    username = State()
+    gb = State()
+    days = State()
+    confirm = State()
+
+
+class AdminRenewMarzbanUser(StatesGroup):
+    username = State()
+    confirm_user = State()
+    gb = State()
+    days = State()
+    confirm = State()
