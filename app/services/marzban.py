@@ -110,6 +110,16 @@ class MarzbanClient:
     async def modify_user(self, username: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not self._token: await self.login()
         return await self._request("PUT", f"/api/user/{username}", json=payload)
+    async def disable_user(self, username: str) -> dict[str, Any]:
+        # Marzban toggles user availability through PUT /api/user/{username};
+        # the API status value for a temporarily inactive account is "disabled".
+        return await self.modify_user(username, {"status": "disabled"})
+    async def enable_user(self, username: str) -> dict[str, Any]:
+        # Sending only the status preserves data_limit, expire, note, inbounds, proxies and other settings.
+        return await self.modify_user(username, {"status": "active"})
+    async def delete_user(self, username: str) -> Any:
+        if not self._token: await self.login()
+        return await self._request("DELETE", f"/api/user/{username}")
     async def build_create_payload(self, payload: dict[str, Any], allowed_inbound_tags: list[str] | None = None) -> dict[str, Any]:
         prepared = {key: value for key, value in payload.items() if key not in _INTERNAL_CREATE_KEYS}
         prepared.setdefault("data_limit_reset_strategy", "no_reset")

@@ -6,6 +6,8 @@ def panel() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 مدیریت ریسلرها", callback_data="adm:resellers"), InlineKeyboardButton(text="➕ افزودن ریسلر", callback_data="adm:add_reseller")],
         [InlineKeyboardButton(text="➕ ساخت کاربر مرزبان", callback_data="adm:mb:create"), InlineKeyboardButton(text="♻️ تمدید کاربر مرزبان", callback_data="adm:mb:renew")],
+        [InlineKeyboardButton(text="⏸ غیرفعال‌سازی کاربر", callback_data="adm:mb:disable"), InlineKeyboardButton(text="▶️ فعال‌سازی کاربر", callback_data="adm:mb:enable")],
+        [InlineKeyboardButton(text="🗑 حذف کاربر مرزبان", callback_data="adm:mb:delete")],
         [InlineKeyboardButton(text="🧾 تراکنش‌ها", callback_data="adm:tx"), InlineKeyboardButton(text="🌐 اینباندها", callback_data="adm:inbounds")],
         [InlineKeyboardButton(text="🛠 حالت تعمیرات", callback_data="adm:maintenance"), InlineKeyboardButton(text="💾 بکاپ", callback_data="adm:backup")],
     ])
@@ -20,6 +22,13 @@ def admin_back_cancel(back: str = "adm:panel") -> InlineKeyboardMarkup:
 def confirm_keyboard(confirm_data: str, back_data: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ تایید", callback_data=confirm_data)],
+        [InlineKeyboardButton(text="⬅️ برگشت", callback_data=back_data), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")],
+    ])
+
+
+def destructive_confirm_keyboard(confirm_data: str, back_data: str, text: str = "🗑 حذف قطعی") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=text, callback_data=confirm_data)],
         [InlineKeyboardButton(text="⬅️ برگشت", callback_data=back_data), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")],
     ])
 
