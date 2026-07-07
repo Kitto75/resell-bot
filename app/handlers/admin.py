@@ -10,14 +10,14 @@ from app.config import get_settings
 from app.database.models import RechargeStatus, ResellerStatus, TransactionType
 from app.database.repositories import InboundRepository, RechargeRepository, ResellerRepository, SettingsRepository, TransactionRepository
 from app.database.session import SessionLocal
-from app.keyboards.admin import admin_back_cancel, backup_keyboard, balance_action_keyboard, confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_reject_keyboard, resellers_keyboard, resellers_menu, status_keyboard, telegram_account_keyboard, telegram_accounts_actions, tx_filter_keyboard, tx_page_keyboard
+from app.keyboards.admin import admin_back_cancel, backup_keyboard, balance_action_keyboard, confirm_keyboard, destructive_confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_reject_keyboard, resellers_keyboard, resellers_menu, status_keyboard, telegram_account_keyboard, telegram_accounts_actions, tx_filter_keyboard, tx_page_keyboard
 from app.services.qr import make_subscription_qr_png
 from app.services.validators import valid_username
 from app.services.backup import get_backup_status, send_database_backup, set_backup_enabled, set_backup_interval, sqlite_backup_supported
 from app.services.billing import BYTES_PER_GB, BillingService
 from app.services.marzban import MarzbanClient, MarzbanError, create_payload_summary, extract_last_user_agent, marzban_payload_debug_structure, on_hold_expire_duration
 from app.utils.formatting import format_bytes_to_gb, format_remaining_time, format_toman, status_fa
-from app.states.admin import AddReseller, AdminCreateMarzbanUser, AdminRenewMarzbanUser, BackupSettings, BalanceEdit, EditReseller, InboundPermissions, MaintenanceMode, RechargeModeration, TelegramAccountManagement, TransactionBrowsing
+from app.states.admin import AddReseller, AdminCreateMarzbanUser, AdminDeleteMarzbanUser, AdminDisableMarzbanUser, AdminEnableMarzbanUser, AdminRenewMarzbanUser, BackupSettings, BalanceEdit, EditReseller, InboundPermissions, MaintenanceMode, RechargeModeration, TelegramAccountManagement, TransactionBrowsing
 
 router = Router()
 PAGE_SIZE = 5
@@ -90,6 +90,12 @@ def _admin_user_info_text(info: dict) -> str:
         f"وضعیت: {status_fa(info.get('status'))}\n"
         f"آخرین برنامه / User-Agent: {extract_last_user_agent(info)}"
     )
+
+
+def _safe_marzban_error_message(action: str, exc: MarzbanError) -> str:
+    if exc.status == 404:
+        return "کاربر موردنظر در مرزبان پیدا نشد. نام کاربری را بررسی کنید."
+    return f"{action} در مرزبان ناموفق بود. جزئیات امن خطا در لاگ ثبت شد."
 
 async def show_panel(message: Message) -> None:
     await message.answer("پنل مدیریت\nیک گزینه را انتخاب کنید.", reply_markup=panel())
@@ -327,6 +333,113 @@ async def admin_renew_marzban_confirm(cb: CallbackQuery, state: FSMContext, is_a
         logger.exception("Admin Marzban renew failed username=%s gb=%s days=%s", username, gb, days)
         await cb.message.answer("تمدید کاربر در مرزبان ناموفق بود. جزئیات امن خطا در لاگ ثبت شد.", reply_markup=panel()); await state.clear(); await cb.answer(); return
     await state.clear(); await cb.message.answer("✅ اکانت مرزبان با موفقیت تمدید شد. هیچ موجودی ریسلری تغییر نکرد.", reply_markup=panel()); await cb.answer()
+
+
+@router.callback_query(F.data == "adm:mb:disable")
+async def admin_disable_marzban_start(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    await state.clear(); await state.set_state(AdminDisableMarzbanUser.username)
+    await cb.message.answer("غیرفعال‌سازی موقت کاربر مرزبان توسط مدیر\nنام کاربری اکانت را وارد کنید:", reply_markup=admin_back_cancel()); await cb.answer()
+
+
+@router.message(AdminDisableMarzbanUser.username)
+async def admin_disable_marzban_username(message: Message, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    username = (message.text or "").strip()
+    try:
+        info = await client().get_user_with_activity(username)
+    except MarzbanError as exc:
+        logger.exception("Admin Marzban disable fetch failed username=%s status=%s", username, exc.status)
+        await message.answer(_safe_marzban_error_message("دریافت اطلاعات کاربر", exc)); return
+    await state.update_data(username=username, info=info); await state.set_state(AdminDisableMarzbanUser.confirm)
+    await message.answer(_admin_user_info_text(info) + "\n\nآیا غیرفعال‌سازی موقت این کاربر را تایید می‌کنید؟\nهزینه/کسر موجودی: ندارد", reply_markup=confirm_keyboard("adm:mb:disable:confirm", "adm:mb:disable"))
+
+
+@router.callback_query(AdminDisableMarzbanUser.confirm, F.data == "adm:mb:disable:confirm")
+async def admin_disable_marzban_confirm(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    data = await state.get_data(); username = data["username"]
+    try:
+        await client().disable_user(username)
+    except MarzbanError as exc:
+        logger.exception("Admin Marzban disable failed admin_id=%s username=%s status=%s", cb.from_user.id, username, exc.status)
+        await cb.message.answer(_safe_marzban_error_message("غیرفعال‌سازی کاربر", exc), reply_markup=panel()); await state.clear(); await cb.answer(); return
+    logger.info("Admin disabled Marzban user admin_id=%s username=%s", cb.from_user.id, username)
+    await state.clear(); await cb.message.answer("✅ کاربر مرزبان با موفقیت به‌صورت موقت غیرفعال شد. هیچ موجودی ریسلری تغییر نکرد.", reply_markup=panel()); await cb.answer()
+
+
+@router.callback_query(F.data == "adm:mb:enable")
+async def admin_enable_marzban_start(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    await state.clear(); await state.set_state(AdminEnableMarzbanUser.username)
+    await cb.message.answer("فعال‌سازی دوباره کاربر مرزبان توسط مدیر\nنام کاربری اکانت را وارد کنید:", reply_markup=admin_back_cancel()); await cb.answer()
+
+
+@router.message(AdminEnableMarzbanUser.username)
+async def admin_enable_marzban_username(message: Message, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    username = (message.text or "").strip()
+    try:
+        info = await client().get_user_with_activity(username)
+    except MarzbanError as exc:
+        logger.exception("Admin Marzban enable fetch failed username=%s status=%s", username, exc.status)
+        await message.answer(_safe_marzban_error_message("دریافت اطلاعات کاربر", exc)); return
+    await state.update_data(username=username, info=info); await state.set_state(AdminEnableMarzbanUser.confirm)
+    await message.answer(_admin_user_info_text(info) + "\n\nآیا فعال‌سازی دوباره این کاربر را تایید می‌کنید؟\nهزینه/کسر موجودی: ندارد", reply_markup=confirm_keyboard("adm:mb:enable:confirm", "adm:mb:enable"))
+
+
+@router.callback_query(AdminEnableMarzbanUser.confirm, F.data == "adm:mb:enable:confirm")
+async def admin_enable_marzban_confirm(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    data = await state.get_data(); username = data["username"]
+    try:
+        await client().enable_user(username)
+    except MarzbanError as exc:
+        logger.exception("Admin Marzban enable failed admin_id=%s username=%s status=%s", cb.from_user.id, username, exc.status)
+        await cb.message.answer(_safe_marzban_error_message("فعال‌سازی کاربر", exc), reply_markup=panel()); await state.clear(); await cb.answer(); return
+    logger.info("Admin enabled Marzban user admin_id=%s username=%s", cb.from_user.id, username)
+    await state.clear(); await cb.message.answer("✅ کاربر مرزبان با موفقیت فعال شد. تنظیمات قبلی کاربر و موجودی ریسلرها تغییر نکرد.", reply_markup=panel()); await cb.answer()
+
+
+@router.callback_query(F.data == "adm:mb:delete")
+async def admin_delete_marzban_start(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    await state.clear(); await state.set_state(AdminDeleteMarzbanUser.username)
+    await cb.message.answer("حذف کاربر مرزبان توسط مدیر\nنام کاربری اکانت را وارد کنید:", reply_markup=admin_back_cancel()); await cb.answer()
+
+
+@router.message(AdminDeleteMarzbanUser.username)
+async def admin_delete_marzban_username(message: Message, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    username = (message.text or "").strip()
+    try:
+        info = await client().get_user_with_activity(username)
+    except MarzbanError as exc:
+        logger.exception("Admin Marzban delete fetch failed username=%s status=%s", username, exc.status)
+        await message.answer(_safe_marzban_error_message("دریافت اطلاعات کاربر", exc)); return
+    await state.update_data(username=username, info=info); await state.set_state(AdminDeleteMarzbanUser.confirm)
+    await message.answer(
+        _admin_user_info_text(info)
+        + "\n\n⚠️ هشدار مهم: حذف این کاربر دائمی است و از داخل ربات قابل بازگردانی نیست.\n"
+        + "اگر مطمئن هستید دکمه «🗑 حذف قطعی» را بزنید.\nهزینه/کسر موجودی: ندارد",
+        reply_markup=destructive_confirm_keyboard("adm:mb:delete:confirm", "adm:mb:delete"),
+    )
+
+
+@router.callback_query(AdminDeleteMarzbanUser.confirm, F.data == "adm:mb:delete:confirm")
+async def admin_delete_marzban_confirm(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    data = await state.get_data(); username = data["username"]
+    try:
+        await client().delete_user(username)
+    except MarzbanError as exc:
+        logger.exception("Admin Marzban delete failed admin_id=%s username=%s status=%s", cb.from_user.id, username, exc.status)
+        await cb.message.answer(_safe_marzban_error_message("حذف کاربر", exc), reply_markup=panel()); await state.clear(); await cb.answer(); return
+    logger.info("Admin deleted Marzban user admin_id=%s username=%s", cb.from_user.id, username)
+    await state.clear(); await cb.message.answer("✅ کاربر مرزبان با موفقیت حذف شد. هیچ موجودی ریسلری تغییر نکرد.", reply_markup=panel()); await cb.answer()
 
 
 @router.callback_query(F.data == "adm:cancel")
