@@ -53,6 +53,23 @@ class ResellerRepository:
         return int(await self.session.scalar(select(func.count(CreatedUser.id)).where(CreatedUser.reseller_id == reseller_id)) or 0)
 
 
+class CreatedUserRepository:
+    def __init__(self, session: AsyncSession) -> None: self.session = session
+
+    async def list_by_reseller(self, reseller_id: int, limit: int = 10, offset: int = 0) -> builtins.list[CreatedUser]:
+        stmt = (
+            select(CreatedUser)
+            .where(CreatedUser.reseller_id == reseller_id)
+            .order_by(CreatedUser.created_at.desc(), CreatedUser.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list((await self.session.scalars(stmt)).all())
+
+    async def count_by_reseller(self, reseller_id: int) -> int:
+        return int(await self.session.scalar(select(func.count(CreatedUser.id)).where(CreatedUser.reseller_id == reseller_id)) or 0)
+
+
 class SettingsRepository:
     def __init__(self, session: AsyncSession) -> None: self.session = session
     async def get(self, key: str, default: str | None = None) -> str | None:
