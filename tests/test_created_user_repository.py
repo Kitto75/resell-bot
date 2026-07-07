@@ -29,12 +29,17 @@ def test_created_users_list_by_reseller_is_paginated_owned_and_newest_first():
             repo = CreatedUserRepository(session)
             first_page = await repo.list_by_reseller(reseller.id, limit=10, offset=0)
             second_page = await repo.list_by_reseller(reseller.id, limit=10, offset=10)
+            first_usernames = await repo.list_usernames_by_reseller(reseller.id, limit=10, offset=0)
+            second_usernames = await repo.list_usernames_by_reseller(reseller.id, limit=10, offset=10)
             total = await repo.count_by_reseller(reseller.id)
 
         assert total == 12
         assert [user.username for user in first_page] == [f"own_{idx}" for idx in range(11, 1, -1)]
         assert [user.username for user in second_page] == ["own_1", "own_0"]
+        assert first_usernames == [f"own_{idx}" for idx in range(11, 1, -1)]
+        assert second_usernames == ["own_1", "own_0"]
         assert all(user.username != "other_user" for user in first_page + second_page)
+        assert "other_user" not in first_usernames + second_usernames
         await engine.dispose()
 
     asyncio.run(run())

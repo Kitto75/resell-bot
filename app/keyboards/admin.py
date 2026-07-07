@@ -155,6 +155,21 @@ def telegram_account_keyboard(accounts, action: str, back_reseller_id: int) -> I
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+
+def reseller_bulk_actions_keyboard(reseller_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏸ غیرفعال‌سازی همه یوزرها", callback_data=f"adm:ru:bulk:{reseller_id}:disable")],
+        [InlineKeyboardButton(text="▶️ فعال‌سازی همه یوزرها", callback_data=f"adm:ru:bulk:{reseller_id}:enable")],
+        [InlineKeyboardButton(text="⬅️ انتخاب ریسلر", callback_data="adm:reseller_users"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")],
+    ])
+
+
+def reseller_bulk_confirm_keyboard(reseller_id: int, action: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ تایید عملیات گروهی", callback_data=f"adm:ru:bulk_confirm:{reseller_id}:{action}")],
+        [InlineKeyboardButton(text="بازگشت", callback_data=f"adm:rusel:{reseller_id}"), InlineKeyboardButton(text="لغو", callback_data="adm:cancel")],
+    ])
+
 def reseller_users_page_keyboard(reseller_id: int, users, page: int, has_next: bool) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(text=user.username, callback_data=f"adm:ru:user:{reseller_id}:{user.id}")] for user in users]
     nav = []

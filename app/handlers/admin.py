@@ -10,7 +10,7 @@ from app.config import get_settings
 from app.database.models import RechargeStatus, ResellerStatus, TransactionType
 from app.database.repositories import CreatedUserRepository, InboundRepository, RechargeRepository, ResellerRepository, SettingsRepository, TransactionRepository
 from app.database.session import SessionLocal
-from app.keyboards.admin import admin_back_cancel, backup_keyboard, balance_action_keyboard, confirm_keyboard, destructive_confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_reject_keyboard, resellers_keyboard, resellers_menu, status_keyboard, reseller_user_actions_keyboard, reseller_users_page_keyboard, telegram_account_keyboard, telegram_accounts_actions, tx_filter_keyboard, tx_page_keyboard
+from app.keyboards.admin import admin_back_cancel, backup_keyboard, balance_action_keyboard, confirm_keyboard, destructive_confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_reject_keyboard, resellers_keyboard, resellers_menu, status_keyboard, reseller_bulk_actions_keyboard, reseller_bulk_confirm_keyboard, reseller_user_actions_keyboard, reseller_users_page_keyboard, telegram_account_keyboard, telegram_accounts_actions, tx_filter_keyboard, tx_page_keyboard
 from app.services.qr import make_subscription_qr_png
 from app.services.validators import valid_username
 from app.services.backup import get_backup_status, send_database_backup, set_backup_enabled, set_backup_interval, sqlite_backup_supported
@@ -22,6 +22,8 @@ from app.states.admin import AddReseller, AdminCreateMarzbanUser, AdminDeleteMar
 router = Router()
 PAGE_SIZE = 5
 RESELLER_USERS_PAGE_SIZE = 10
+RESELLER_USERS_BULK_BATCH_SIZE = 100
+RESELLER_USERS_FAILED_SAMPLE_LIMIT = 10
 logger = logging.getLogger(__name__)
 
 
@@ -448,8 +450,6 @@ async def admin_delete_marzban_confirm(cb: CallbackQuery, state: FSMContext, is_
 
 
 async def _show_reseller_users(message: Message, state: FSMContext, reseller_id: int, page: int = 0) -> None:
-    if page < 0:
-        page = 0
     async with SessionLocal() as session:
         reseller_repo = ResellerRepository(session)
         reseller = await reseller_repo.get(reseller_id)
@@ -457,26 +457,29 @@ async def _show_reseller_users(message: Message, state: FSMContext, reseller_id:
             await message.answer("ریسلر پیدا نشد یا حذف شده است.", reply_markup=panel())
             await state.clear()
             return
-        user_repo = CreatedUserRepository(session)
-        total = await user_repo.count_by_reseller(reseller_id)
-        users = await user_repo.list_by_reseller(reseller_id, limit=RESELLER_USERS_PAGE_SIZE, offset=page * RESELLER_USERS_PAGE_SIZE)
+        primary_telegram_id = await reseller_repo.primary_telegram_id(reseller)
+        total = await CreatedUserRepository(session).count_by_reseller(reseller_id)
     await state.set_state(AdminResellerUsers.browse)
-    await state.update_data(reseller_id=reseller_id, page=page)
+    await state.update_data(reseller_id=reseller_id)
     if total == 0:
         await message.answer(
-            f"👥 یوزرهای ریسلر\n\nریسلر: {reseller.display_name}\n\nاین ریسلر هنوز هیچ یوزری نساخته است.",
+            f"👥 یوزرهای ریسلر\n\nریسلر: {reseller.display_name}\nشناسه ریسلر: {reseller.id}\nآیدی تلگرام اصلی: {primary_telegram_id}\n\nاین ریسلر هنوز هیچ یوزری نساخته است.",
             reply_markup=admin_back_cancel("adm:reseller_users"),
         )
         return
-    shown_from = page * RESELLER_USERS_PAGE_SIZE + 1
-    shown_to = shown_from + len(users) - 1
     text = (
         "👥 یوزرهای ریسلر\n\n"
         f"ریسلر: {reseller.display_name}\n"
-        f"صفحه {page + 1} - نمایش {shown_from} تا {shown_to} از {total}\n\n"
-        "برای مدیریت وضعیت، یک نام کاربری را انتخاب کنید."
+        f"شناسه ریسلر: {reseller.id}\n"
+        f"آیدی تلگرام اصلی: {primary_telegram_id}\n"
+        f"تعداد یوزرهای ثبت‌شده محلی: {total}\n\n"
+        "برای این ریسلر فقط عملیات گروهی در دسترس است. نام کاربری‌ها به صورت جداگانه نمایش داده نمی‌شوند."
     )
-    await message.answer(text, reply_markup=reseller_users_page_keyboard(reseller_id, users, page, total > shown_to))
+    await message.answer(text, reply_markup=reseller_bulk_actions_keyboard(reseller_id))
+
+
+def _bulk_action_label(action: str) -> str:
+    return "غیرفعال‌سازی همه یوزرها" if action == "disable" else "فعال‌سازی همه یوزرها"
 
 
 @router.callback_query(F.data == "adm:reseller_users")
@@ -499,86 +502,124 @@ async def reseller_users_selected(cb: CallbackQuery, state: FSMContext, is_admin
     await cb.answer()
 
 
+@router.callback_query(F.data.startswith("adm:ru:bulk:"))
+async def reseller_users_bulk_action(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    try:
+        _, _, _, reseller_id_text, action = cb.data.split(":")
+        reseller_id = int(reseller_id_text)
+    except (ValueError, AttributeError):
+        await cb.answer("داده نامعتبر است.", show_alert=True); return
+    if action not in {"enable", "disable"}:
+        await cb.answer("عملیات نامعتبر است.", show_alert=True); return
+    async with SessionLocal() as session:
+        reseller_repo = ResellerRepository(session)
+        reseller = await reseller_repo.get(reseller_id)
+        if reseller is None:
+            await cb.message.answer("ریسلر پیدا نشد یا حذف شده است.", reply_markup=panel()); await state.clear(); await cb.answer(); return
+        primary_telegram_id = await reseller_repo.primary_telegram_id(reseller)
+        total = await CreatedUserRepository(session).count_by_reseller(reseller_id)
+    await state.update_data(reseller_id=reseller_id, bulk_action=action, total=total)
+    label = _bulk_action_label(action)
+    warning = (
+        "⚠️ تایید عملیات گروهی بسیار مهم\n\n"
+        f"ریسلر: {reseller.display_name}\n"
+        f"شناسه ریسلر: {reseller.id}\n"
+        f"آیدی تلگرام اصلی: {primary_telegram_id}\n"
+        f"تعداد یوزرهای ساخته‌شده در دیتابیس محلی: {total}\n\n"
+        f"با تایید، وضعیت همه این {total} یوزر در Marzban به صورت گروهی برای عملیات «{label}» تغییر می‌کند.\n"
+        "این عملیات موجودی ریسلر را تغییر نمی‌دهد، تراکنش مالی ایجاد نمی‌کند و نام کاربری‌ها به صورت تک‌تک انتخاب نمی‌شوند."
+    )
+    await cb.message.answer(warning, reply_markup=reseller_bulk_confirm_keyboard(reseller_id, action))
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("adm:ru:bulk_confirm:"))
+async def reseller_users_bulk_confirm(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    try:
+        _, _, _, reseller_id_text, action = cb.data.split(":")
+        reseller_id = int(reseller_id_text)
+    except (ValueError, AttributeError):
+        await cb.answer("داده نامعتبر است.", show_alert=True); return
+    if action not in {"enable", "disable"}:
+        await cb.answer("عملیات نامعتبر است.", show_alert=True); return
+    total = success = failed = 0
+    failed_usernames: list[str] = []
+    offset = 0
+    marzban = client()
+    async with SessionLocal() as session:
+        reseller = await ResellerRepository(session).get(reseller_id)
+        if reseller is None:
+            await cb.message.answer("ریسلر پیدا نشد یا حذف شده است.", reply_markup=panel()); await state.clear(); await cb.answer(); return
+        user_repo = CreatedUserRepository(session)
+        local_total = await user_repo.count_by_reseller(reseller_id)
+        reseller_name = reseller.display_name
+        while True:
+            usernames = await user_repo.list_usernames_by_reseller(reseller_id, limit=RESELLER_USERS_BULK_BATCH_SIZE, offset=offset)
+            if not usernames:
+                break
+            for username in usernames:
+                total += 1
+                try:
+                    if action == "disable":
+                        await marzban.disable_user(username)
+                    else:
+                        await marzban.enable_user(username)
+                    success += 1
+                except MarzbanError as exc:
+                    failed += 1
+                    if len(failed_usernames) < RESELLER_USERS_FAILED_SAMPLE_LIMIT:
+                        failed_usernames.append(username)
+                    logger.exception("Admin reseller bulk user action failed admin_id=%s reseller_id=%s reseller=%s username=%s action=%s status=%s", cb.from_user.id, reseller_id, reseller_name, username, action, exc.status)
+            offset += RESELLER_USERS_BULK_BATCH_SIZE
+    label = _bulk_action_label(action)
+    lines = [
+        "✅ عملیات گروهی انجام شد",
+        "",
+        f"ریسلر: {reseller_name}",
+        f"عملیات: {label}",
+        f"تعداد کل ثبت‌شده محلی: {local_total}",
+        f"پردازش‌شده: {total}",
+        f"موفق: {success}",
+        f"ناموفق/مفقود در مرزبان: {failed}",
+        "موجودی ریسلر تغییر نکرد و تراکنش مالی ایجاد نشد.",
+    ]
+    if failed_usernames:
+        lines.extend(["", "نمونه ناموفق‌ها:", *[f"- {username}" for username in failed_usernames]])
+    logger.info("Admin reseller bulk action completed admin_id=%s reseller_id=%s reseller=%s action=%s total=%s success=%s failed=%s", cb.from_user.id, reseller_id, reseller_name, action, total, success, failed)
+    await state.clear()
+    await cb.message.answer("\n".join(lines), reply_markup=reseller_bulk_actions_keyboard(reseller_id))
+    await cb.answer()
+
+
 @router.callback_query(F.data.startswith("adm:ru:page:"))
 async def reseller_users_page(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
     if not is_admin:
         await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
     try:
-        _, _, _, reseller_id_text, page_text = cb.data.split(":")
-        reseller_id = int(reseller_id_text); page = int(page_text)
+        _, _, _, reseller_id_text, _page_text = cb.data.split(":")
+        reseller_id = int(reseller_id_text)
     except (ValueError, AttributeError):
         await cb.answer("داده نامعتبر است.", show_alert=True); return
-    await _show_reseller_users(cb.message, state, reseller_id, page)
-    await cb.answer()
+    await _show_reseller_users(cb.message, state, reseller_id, 0)
+    await cb.answer("این بخش اکنون فقط عملیات گروهی دارد.")
 
 
 @router.callback_query(F.data.startswith("adm:ru:user:"))
 async def reseller_user_details(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
     if not is_admin:
         await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
-    try:
-        _, _, _, reseller_id_text, created_user_id_text = cb.data.split(":")
-        reseller_id = int(reseller_id_text); created_user_id = int(created_user_id_text)
-    except (ValueError, AttributeError):
-        await cb.answer("داده نامعتبر است.", show_alert=True); return
-    data = await state.get_data(); page = int(data.get("page") or 0)
-    async with SessionLocal() as session:
-        reseller_repo = ResellerRepository(session)
-        reseller = await reseller_repo.get(reseller_id)
-        created_user = await CreatedUserRepository(session).get_by_reseller_and_id(reseller_id, created_user_id)
-    if reseller is None or created_user is None:
-        await cb.message.answer("ریسلر یا یوزر انتخاب‌شده در دیتابیس پیدا نشد.", reply_markup=panel()); await state.clear(); await cb.answer(); return
-    try:
-        info = await client().get_user_with_activity(created_user.username)
-    except MarzbanError as exc:
-        if exc.status == 404:
-            await cb.message.answer(
-                f"این یوزر در مرزبان پیدا نشد، اما در دیتابیس ربات ثبت شده است.\n\nنام کاربری: {created_user.username}",
-                reply_markup=reseller_user_actions_keyboard(reseller_id, created_user_id, page),
-            )
-            await cb.answer(); return
-        logger.exception("Admin reseller-user fetch failed admin_id=%s reseller_id=%s username=%s status=%s", cb.from_user.id, reseller_id, created_user.username, exc.status)
-        await cb.message.answer(_safe_marzban_error_message("دریافت اطلاعات کاربر", exc), reply_markup=panel()); await cb.answer(); return
-    await state.set_state(AdminResellerUsers.user)
-    await state.update_data(reseller_id=reseller_id, created_user_id=created_user_id, username=created_user.username, page=page)
-    await cb.message.answer(
-        f"ریسلر: {reseller.display_name}\n\n" + _admin_user_info_text(info),
-        reply_markup=reseller_user_actions_keyboard(reseller_id, created_user_id, page),
-    )
-    await cb.answer()
+    await cb.answer("در این بخش انتخاب تکی یوزر غیرفعال شده است.", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("adm:ru:act:"))
 async def reseller_user_action(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
     if not is_admin:
         await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
-    try:
-        _, _, _, reseller_id_text, created_user_id_text, action, page_text = cb.data.split(":")
-        reseller_id = int(reseller_id_text); created_user_id = int(created_user_id_text); page = int(page_text)
-    except (ValueError, AttributeError):
-        await cb.answer("داده نامعتبر است.", show_alert=True); return
-    if action not in {"enable", "disable"}:
-        await cb.answer("عملیات نامعتبر است.", show_alert=True); return
-    async with SessionLocal() as session:
-        reseller = await ResellerRepository(session).get(reseller_id)
-        created_user = await CreatedUserRepository(session).get_by_reseller_and_id(reseller_id, created_user_id)
-    if reseller is None or created_user is None:
-        await cb.message.answer("ریسلر یا یوزر انتخاب‌شده در دیتابیس پیدا نشد.", reply_markup=panel()); await state.clear(); await cb.answer(); return
-    try:
-        if action == "enable":
-            await client().enable_user(created_user.username)
-            success = "✅ یوزر با موفقیت فعال شد. هیچ موجودی ریسلری تغییر نکرد."
-            log_action = "enable"
-        else:
-            await client().disable_user(created_user.username)
-            success = "✅ یوزر با موفقیت غیرفعال شد. هیچ موجودی ریسلری تغییر نکرد."
-            log_action = "disable"
-    except MarzbanError as exc:
-        logger.exception("Admin reseller-user action failed admin_id=%s reseller_id=%s reseller=%s username=%s action=%s status=%s", cb.from_user.id, reseller.id, reseller.display_name, created_user.username, action, exc.status)
-        await cb.message.answer(_safe_marzban_error_message("تغییر وضعیت کاربر", exc), reply_markup=reseller_user_actions_keyboard(reseller_id, created_user_id, page)); await cb.answer(); return
-    logger.info("Admin reseller-user action admin_id=%s reseller_id=%s reseller=%s username=%s action=%s", cb.from_user.id, reseller.id, reseller.display_name, created_user.username, log_action)
-    await cb.message.answer(success, reply_markup=reseller_user_actions_keyboard(reseller_id, created_user_id, page))
-    await cb.answer()
+    await cb.answer("در این بخش فقط عملیات گروهی مجاز است.", show_alert=True)
 
 @router.callback_query(F.data == "adm:cancel")
 async def cancel(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
