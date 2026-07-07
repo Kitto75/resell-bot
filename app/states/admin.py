@@ -44,3 +44,8 @@ class RejectRecharge(StatesGroup):
 
 class BackupSettings(StatesGroup):
     interval = State()
+
+
+class TelegramAccountManagement(StatesGroup):
+    select_reseller = State()
+    add = State()
