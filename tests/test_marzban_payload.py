@@ -289,6 +289,41 @@ class MarzbanUserAgentExtractorTests(unittest.TestCase):
         data = {"sessions": [{"client": {"app_name": "NekoBox", "app_version": "1.3.4"}, "connected_at": 12345}]}
         self.assertEqual(extract_last_user_agent(data), "NekoBox / 1.3.4")
 
+    def test_marzban_user_agents_list_uses_latest_timestamp(self):
+        from app.services.marzban import extract_last_user_agent
+        data = {
+            "username": "u",
+            "status": "active",
+            "data_limit": 10_000,
+            "used_traffic": 5_000,
+            "expire": 1_800_000_000,
+            "user_agents": [
+                {"user_agent": "v2rayNG/1.8.17 Android", "last_online": 100},
+                {"user_agent": "Hiddify/2.0.5 iOS", "last_online": 200},
+            ],
+        }
+        self.assertEqual(extract_last_user_agent(data), "Hiddify/2.0.5 iOS")
+
+    def test_nested_user_agent_object(self):
+        from app.services.marzban import extract_last_user_agent
+        data = {"user_agent": {"value": "Streisand/1.6.8 iOS", "last_connected_at": "2026-07-07T10:00:00Z"}}
+        self.assertEqual(extract_last_user_agent(data), "Streisand/1.6.8 iOS")
+
+    def test_marzban_user_agents_mapping_key(self):
+        from app.services.marzban import extract_last_user_agent
+        data = {"user_agents": {"v2rayNG/1.8.19 Android": 3}}
+        self.assertEqual(extract_last_user_agent(data), "v2rayNG/1.8.19 Android")
+
+    def test_activity_data_with_traffic_and_expire_fields(self):
+        from app.services.marzban import extract_last_user_agent
+        data = {
+            "data_limit": 100,
+            "used_traffic": 50,
+            "expire": 1_800_000_000,
+            "activity": [{"client_name": "Karing", "platform": "Android", "timestamp": 10}],
+        }
+        self.assertEqual(extract_last_user_agent(data), "Karing / Android")
+
     def test_rejects_subscription_links_protocols_usernames_and_ips(self):
         from app.services.marzban import extract_last_user_agent
         bad_values = [
@@ -296,6 +331,7 @@ class MarzbanUserAgentExtractorTests(unittest.TestCase):
             {"online_clients": [{"client": "vless", "ip": "192.0.2.1"}]},
             {"usages": {"vless": [{"user_agent": "203.0.113.9"}]}},
             {"sessions": [{"username": "alice", "link": "vmess://secret"}]},
+            {"user_agents": ["vless://example", "trojan://example", "https://example.test/sub/u"]},
         ]
         for payload in bad_values:
             with self.subTest(payload=payload):
