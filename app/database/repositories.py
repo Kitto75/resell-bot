@@ -69,6 +69,16 @@ class CreatedUserRepository:
     async def count_by_reseller(self, reseller_id: int) -> int:
         return int(await self.session.scalar(select(func.count(CreatedUser.id)).where(CreatedUser.reseller_id == reseller_id)) or 0)
 
+    async def get_by_reseller_and_id(self, reseller_id: int, created_user_id: int) -> CreatedUser | None:
+        return await self.session.scalar(
+            select(CreatedUser).where(CreatedUser.reseller_id == reseller_id, CreatedUser.id == created_user_id)
+        )
+
+    async def get_by_reseller_and_username(self, reseller_id: int, username: str) -> CreatedUser | None:
+        return await self.session.scalar(
+            select(CreatedUser).where(CreatedUser.reseller_id == reseller_id, CreatedUser.username == username)
+        )
+
 
 class SettingsRepository:
     def __init__(self, session: AsyncSession) -> None: self.session = session

@@ -8,6 +8,7 @@ def panel() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="➕ ساخت کاربر مرزبان", callback_data="adm:mb:create"), InlineKeyboardButton(text="♻️ تمدید کاربر مرزبان", callback_data="adm:mb:renew")],
         [InlineKeyboardButton(text="⏸ غیرفعال‌سازی کاربر", callback_data="adm:mb:disable"), InlineKeyboardButton(text="▶️ فعال‌سازی کاربر", callback_data="adm:mb:enable")],
         [InlineKeyboardButton(text="🗑 حذف کاربر مرزبان", callback_data="adm:mb:delete")],
+        [InlineKeyboardButton(text="👥 یوزرهای ریسلر", callback_data="adm:reseller_users")],
         [InlineKeyboardButton(text="🧾 تراکنش‌ها", callback_data="adm:tx"), InlineKeyboardButton(text="🌐 اینباندها", callback_data="adm:inbounds")],
         [InlineKeyboardButton(text="🛠 حالت تعمیرات", callback_data="adm:maintenance"), InlineKeyboardButton(text="💾 بکاپ", callback_data="adm:backup")],
     ])
@@ -152,3 +153,25 @@ def telegram_account_keyboard(accounts, action: str, back_reseller_id: int) -> I
     rows = [[InlineKeyboardButton(text=f"{'⭐ ' if account.is_primary else ''}{account.telegram_id}", callback_data=f"adm:tg:{action}:acct:{account.id}")] for account in accounts]
     rows.append([InlineKeyboardButton(text="⬅️ برگشت", callback_data=f"adm:tgsel:{back_reseller_id}"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def reseller_users_page_keyboard(reseller_id: int, users, page: int, has_next: bool) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text=user.username, callback_data=f"adm:ru:user:{reseller_id}:{user.id}")] for user in users]
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️ قبلی", callback_data=f"adm:ru:page:{reseller_id}:{page-1}"))
+    if has_next:
+        nav.append(InlineKeyboardButton(text="بعدی ➡️", callback_data=f"adm:ru:page:{reseller_id}:{page+1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(text="⬅️ انتخاب ریسلر", callback_data="adm:reseller_users"), InlineKeyboardButton(text="🏠 پنل مدیریت", callback_data="adm:panel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def reseller_user_actions_keyboard(reseller_id: int, created_user_id: int, page: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="▶️ فعال‌سازی", callback_data=f"adm:ru:act:{reseller_id}:{created_user_id}:enable:{page}")],
+        [InlineKeyboardButton(text="⏸ غیرفعال‌سازی", callback_data=f"adm:ru:act:{reseller_id}:{created_user_id}:disable:{page}")],
+        [InlineKeyboardButton(text="بازگشت", callback_data=f"adm:ru:page:{reseller_id}:{page}")],
+        [InlineKeyboardButton(text="🏠 پنل مدیریت", callback_data="adm:panel")],
+    ])
