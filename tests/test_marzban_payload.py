@@ -261,6 +261,23 @@ class MarzbanUserAgentExtractorTests(unittest.TestCase):
         data = {"devices": [{"user_agent": "OldApp/1.0", "last_online": 10}, {"user_agent": "NewApp/2.0", "last_online": 20}]}
         self.assertEqual(extract_last_user_agent(data), "NewApp/2.0")
 
+    def test_sub_last_user_agent_exact(self):
+        from app.services.marzban import extract_last_user_agent
+        self.assertEqual(extract_last_user_agent({"sub_last_user_agent": "HiddifyNext/2.5.7 (Android)"}), "HiddifyNext/2.5.7 (Android)")
+
+    def test_sub_last_user_agent_rejects_proxy_link(self):
+        from app.services.marzban import extract_last_user_agent
+        self.assertEqual(extract_last_user_agent({"sub_last_user_agent": "vless://example"}), "نامشخص")
+
+    def test_sub_last_user_agent_empty_is_unknown(self):
+        from app.services.marzban import extract_last_user_agent
+        self.assertEqual(extract_last_user_agent({"sub_last_user_agent": ""}), "نامشخص")
+
+    def test_sub_last_user_agent_preferred_over_nested_fallback(self):
+        from app.services.marzban import extract_last_user_agent
+        data = {"sub_last_user_agent": "HiddifyNext/2.5.7 (Android)", "devices": [{"user_agent": "NestedApp/9.9", "last_online": 999}]}
+        self.assertEqual(extract_last_user_agent(data), "HiddifyNext/2.5.7 (Android)")
+
     def test_missing_and_unexpected_format_no_crash(self):
         from app.services.marzban import extract_last_user_agent
         self.assertEqual(extract_last_user_agent({"usages": ["bad", {"ip": "1.2.3.4"}], "links": ["https://example.test/sub"]}), "نامشخص")

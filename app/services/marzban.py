@@ -226,10 +226,19 @@ def prepare_create_payload(payload: dict[str, Any], validity_days: int | None = 
 
 
 _UA_KEYS = (
+    # Marzban's user endpoint can expose the latest subscription client directly.
+    "sub_last_user_agent",
     # Marzban's user endpoint can expose recent app details in `user_agents`.
     "user_agents", "userAgents",
-    "last_connected_user_agent", "last_user_agent", "user_agent", "userAgent", "user_agent_string",
+    "last_user_agent", "last_connected_user_agent", "user_agent", "userAgent", "user_agent_string",
     "userAgentString", "ua", "client_user_agent", "clientUserAgent", "client_ua", "app_user_agent",
+)
+_DIRECT_UA_KEYS = (
+    "sub_last_user_agent",
+    "last_user_agent",
+    "last_connected_user_agent",
+    "user_agent",
+    "client_user_agent",
 )
 _DEVICE_KEYS = (
     "app", "application", "app_name", "app_version", "client", "client_name", "client_version",
@@ -264,6 +273,25 @@ def _looks_like_ip(value: str) -> bool:
     except ValueError:
         return False
 
+
+
+def _user_agent_rejection_reason(value: Any, key: str | None = None) -> str | None:
+    text = str(value or "").strip()
+    normalized_key = str(key or "").strip()
+    lowered = text.lower()
+    if not text:
+        return "empty"
+    if normalized_key and normalized_key in _NON_UA_KEYS:
+        return "not_probable_user_agent"
+    if _looks_like_url_or_proxy(text):
+        return "looks_like_url"
+    if _looks_like_ip(text):
+        return "looks_like_ip"
+    if lowered in _PROTOCOL_NAMES:
+        return "not_probable_user_agent"
+    if _is_probable_user_agent(value, key):
+        return None
+    return "not_probable_user_agent"
 
 def _is_probable_user_agent(value: Any, key: str | None = None) -> bool:
     text = str(value or "").strip()
@@ -385,9 +413,14 @@ def log_user_agent_debug(username: str, user_data: dict[str, Any]) -> None:
     interesting = {key: redact_user_agent_debug_fields(user_data.get(key)) for key in interesting_keys if key in user_data}
     logger.debug("Marzban user-agent fields username=%s fields=%s", username, interesting)
     if extract_last_user_agent(user_data) == "نامشخص":
+        sub_value = user_data.get("sub_last_user_agent") if isinstance(user_data, dict) else None
+        sub_exists = isinstance(user_data, dict) and "sub_last_user_agent" in user_data
+        sub_rejection_reason = _user_agent_rejection_reason(sub_value, "sub_last_user_agent") if sub_exists else None
         logger.info(
-            "Marzban user-agent not found username=%s safe_payload_structure=%s",
+            "Marzban user-agent not found username=%s sub_last_user_agent_exists=%s sub_last_user_agent_rejected_reason=%s safe_payload_structure=%s",
             username,
+            sub_exists,
+            sub_rejection_reason,
             marzban_payload_debug_structure(user_data),
         )
 
@@ -416,6 +449,11 @@ def extract_last_user_agent(user_data: dict[str, Any]) -> str:
     """Return latest real client/app User-Agent from a Marzban user payload."""
     if not isinstance(user_data, dict):
         return "نامشخص"
+
+    for key in _DIRECT_UA_KEYS:
+        value = user_data.get(key)
+        if isinstance(value, str) and _is_probable_user_agent(value, key):
+            return value.strip()
 
     candidates = _collect_activity_mappings(user_data)
     if any(_timestamp_value(item) > 0 for item in candidates):
