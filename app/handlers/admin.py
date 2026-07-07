@@ -15,7 +15,7 @@ from app.services.qr import make_subscription_qr_png
 from app.services.validators import valid_username
 from app.services.backup import get_backup_status, send_database_backup, set_backup_enabled, set_backup_interval, sqlite_backup_supported
 from app.services.billing import BYTES_PER_GB, BillingService
-from app.services.marzban import MarzbanClient, MarzbanError, create_payload_summary, extract_last_user_agent, on_hold_expire_duration
+from app.services.marzban import MarzbanClient, MarzbanError, create_payload_summary, extract_last_user_agent, marzban_payload_debug_structure, on_hold_expire_duration
 from app.utils.formatting import format_bytes_to_gb, format_remaining_time, format_toman, status_fa
 from app.states.admin import AddReseller, AdminCreateMarzbanUser, AdminRenewMarzbanUser, BackupSettings, BalanceEdit, EditReseller, InboundPermissions, MaintenanceMode, RechargeModeration, TelegramAccountManagement, TransactionBrowsing
 
@@ -93,6 +93,35 @@ def _admin_user_info_text(info: dict) -> str:
 
 async def show_panel(message: Message) -> None:
     await message.answer("پنل مدیریت\nیک گزینه را انتخاب کنید.", reply_markup=panel())
+
+
+@router.message(Command("debug_user_agent"))
+async def debug_user_agent_command(message: Message, is_admin: bool) -> None:
+    if not is_admin:
+        return
+    username = (message.text or "").replace("/debug_user_agent", "", 1).strip()
+    if not username:
+        await message.answer("Usage: /debug_user_agent username")
+        return
+    try:
+        info = await client().get_user_with_activity(username)
+    except MarzbanError:
+        logger.exception("Admin Marzban user-agent debug fetch failed username=%s", username)
+        await message.answer("دریافت اطلاعات کاربر از مرزبان ناموفق بود. لاگ‌ها را بررسی کنید.")
+        return
+    user_agent = extract_last_user_agent(info)
+    logger.info(
+        "Manual Marzban user-agent debug username=%s extracted=%s safe_payload_structure=%s",
+        username,
+        user_agent,
+        marzban_payload_debug_structure(info),
+    )
+    await message.answer(
+        "Debug logged safely.\n"
+        f"username: {username}\n"
+        f"extracted User-Agent: {user_agent}\n"
+        "Check bot logs for: Manual Marzban user-agent debug"
+    )
 
 async def show_backup_menu(message: Message) -> None:
     if not sqlite_backup_supported():
