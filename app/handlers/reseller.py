@@ -17,7 +17,7 @@ from app.services.marzban import MarzbanClient, MarzbanError, create_payload_sum
 from app.services.qr import make_subscription_qr_png
 from app.services.reports import operation_report
 from app.services.validators import valid_username
-from app.states.reseller import CreateUser, Recharge, RenewUser
+from app.states.reseller import CreateUser, Recharge, RenewUser, ToggleUserStatus
 from app.utils.formatting import format_bytes_to_gb, format_remaining_time, format_toman, status_fa
 
 router = Router()
@@ -168,6 +168,26 @@ async def create_user_safely(marzban: MarzbanClient, payload: dict, reseller_nam
         return False, MARZBAN_CREATE_FAILED, exc, None
 
 
+
+
+def _reseller_user_info_text(info: dict) -> str:
+    limit = int(info.get("data_limit") or 0)
+    used = int(info.get("used_traffic") or 0)
+    return (
+        f"اطلاعات اکانت\n"
+        f"نام کاربری: {info.get('username') or 'نامشخص'}\n"
+        f"وضعیت فعلی: {status_fa(info.get('status'))}\n"
+        f"حجم کل: {format_bytes_to_gb(limit)}\n"
+        f"مصرف‌شده: {format_bytes_to_gb(used)}\n"
+        f"باقی‌مانده: {format_bytes_to_gb(max(0, limit-used))}\n"
+        f"زمان باقی‌مانده: {format_remaining_time(info.get('expire'), info.get('remaining_seconds'), info.get('remaining_days'))}\n"
+        f"آخرین برنامه / User-Agent: {extract_last_user_agent(info)}"
+    )
+
+
+def _reseller_toggle_action_text(action: str) -> str:
+    return "غیرفعال‌سازی" if action == "disable" else "فعال‌سازی"
+
 async def send_create_debug_report(cb: CallbackQuery, username: str, reseller_name: str, exc: MarzbanError, payload: dict) -> None:
     summary = create_payload_summary(payload)
     logger.error("Marzban create failed after fallback username=%s reseller=%s status=%s body=%s payload_summary=%s. Create and get_user both failed when applicable; possible schema/payload rejection or Marzban internal API failure.", username, reseller_name, exc.status, exc.message, summary)
@@ -263,6 +283,63 @@ async def create_confirm(cb: CallbackQuery, state: FSMContext, reseller: Reselle
 async def subscription_link_warning(cb: CallbackQuery) -> None:
     await cb.message.answer("دریافت خودکار لینک اشتراک برای اکانت‌های در انتظار اتصال غیرفعال است تا اکانت ناخواسته فعال نشود. در صورت نیاز، لینک را مستقیماً از پنل Marzban و با آگاهی از رفتار on_hold دریافت کنید.")
     await cb.answer()
+
+
+@router.callback_query(F.data.in_({"res:mb:disable", "res:mb:enable"}))
+async def reseller_toggle_user_start(cb: CallbackQuery, state: FSMContext, reseller: Reseller | None) -> None:
+    if reseller is None:
+        await cb.answer("حساب ریسلری پیدا نشد.", show_alert=True); return
+    action = "disable" if cb.data == "res:mb:disable" else "enable"
+    await state.clear(); await state.update_data(toggle_action=action); await state.set_state(ToggleUserStatus.username)
+    await cb.message.answer(f"{_reseller_toggle_action_text(action)} کاربر مرزبان\nنام کاربری اکانت متعلق به خودتان را وارد کنید:", reply_markup=back_cancel())
+    await cb.answer()
+
+
+@router.message(ToggleUserStatus.username)
+async def reseller_toggle_user_username(message: Message, state: FSMContext, reseller: Reseller) -> None:
+    username = (message.text or "").strip()
+    if not valid_username(username):
+        await message.answer("نام کاربری نامعتبر است. فقط حروف کوچک انگلیسی، عدد و زیرخط مجاز است."); return
+    data = await state.get_data(); action = data.get("toggle_action") or "disable"
+    try:
+        info = await client().get_user_with_activity(username)
+    except MarzbanError as exc:
+        logger.exception("Reseller Marzban %s fetch failed telegram_id=%s reseller=%s username=%s status=%s", action, message.from_user.id, reseller.display_name, username, exc.status)
+        await message.answer("دریافت اطلاعات کاربر از مرزبان ممکن نشد. نام کاربری را بررسی کنید یا با پشتیبانی تماس بگیرید."); return
+    if not user_belongs_to_reseller(info, reseller.display_name):
+        logger.info("Reseller Marzban %s denied ownership telegram_id=%s reseller=%s username=%s", action, message.from_user.id, reseller.display_name, username)
+        await message.answer("این اکانت متعلق به شما نیست."); return
+    await state.update_data(username=username, info=info); await state.set_state(ToggleUserStatus.confirm)
+    confirm_data = f"res:mb:{action}:confirm"
+    confirm_text = "✅ تایید غیرفعال‌سازی" if action == "disable" else "✅ تایید فعال‌سازی"
+    await message.answer(
+        _reseller_user_info_text(info)
+        + f"\n\nآیا {_reseller_toggle_action_text(action)} این کاربر را تایید می‌کنید؟\nهزینه/کسر/بازگشت موجودی: ندارد",
+        reply_markup=reseller_confirm(confirm_data, f"res:mb:{action}", confirm_text),
+    )
+
+
+@router.callback_query(ToggleUserStatus.confirm, F.data.in_({"res:mb:disable:confirm", "res:mb:enable:confirm"}))
+async def reseller_toggle_user_confirm(cb: CallbackQuery, state: FSMContext, reseller: Reseller) -> None:
+    data = await state.get_data(); username = data["username"]
+    action = "disable" if cb.data == "res:mb:disable:confirm" else "enable"
+    marzban = client()
+    try:
+        user = await marzban.get_user(username)
+        if not user_belongs_to_reseller(user, reseller.display_name):
+            logger.info("Reseller Marzban %s denied on confirm telegram_id=%s reseller=%s username=%s", action, cb.from_user.id, reseller.display_name, username)
+            await cb.message.answer("این اکانت متعلق به شما نیست."); await state.clear(); await cb.answer(); return
+        if action == "disable":
+            await marzban.disable_user(username)
+        else:
+            await marzban.enable_user(username)
+    except MarzbanError as exc:
+        logger.exception("Reseller Marzban %s failed telegram_id=%s reseller=%s username=%s status=%s", action, cb.from_user.id, reseller.display_name, username, exc.status)
+        await cb.message.answer(f"{_reseller_toggle_action_text(action)} کاربر در مرزبان ناموفق بود. لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید.", reply_markup=dashboard())
+        await state.clear(); await cb.answer(); return
+    logger.info("Reseller Marzban user status changed telegram_id=%s reseller=%s username=%s action=%s", cb.from_user.id, reseller.display_name, username, action)
+    success = "غیرفعال شد" if action == "disable" else "فعال شد"
+    await state.clear(); await cb.message.answer(f"✅ کاربر مرزبان با موفقیت {success}. هیچ موجودی یا تراکنشی تغییر نکرد.", reply_markup=dashboard()); await cb.answer()
 
 @router.callback_query(F.data == "res:renew")
 async def renew_start(cb: CallbackQuery, state: FSMContext, reseller: Reseller | None) -> None:

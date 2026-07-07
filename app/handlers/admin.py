@@ -433,6 +433,8 @@ async def admin_delete_marzban_username(message: Message, state: FSMContext, is_
 async def admin_delete_marzban_confirm(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
     if not is_admin: return
     data = await state.get_data(); username = data["username"]
+    # Admin Marzban deletion is a management-only action: it must not refund,
+    # recharge, create balance transactions, or mutate reseller balances.
     try:
         await client().delete_user(username)
     except MarzbanError as exc:
