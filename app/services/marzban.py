@@ -226,6 +226,8 @@ def prepare_create_payload(payload: dict[str, Any], validity_days: int | None = 
 
 
 _UA_KEYS = (
+    # Marzban's user endpoint can expose recent app details in `user_agents`.
+    "user_agents", "userAgents",
     "last_connected_user_agent", "last_user_agent", "user_agent", "userAgent", "user_agent_string",
     "userAgentString", "ua", "client_user_agent", "clientUserAgent", "client_ua", "app_user_agent",
 )
@@ -236,7 +238,7 @@ _DEVICE_KEYS = (
 )
 _ACTIVITY_KEYS = (
     "usages", "usage", "usage_details", "devices", "device", "online_clients", "online_client",
-    "last_connected", "sessions", "session", "clients", "client", "statistics", "stats", "user_stats",
+    "last_connected", "sessions", "session", "clients", "client", "activity", "activities", "statistics", "stats", "user_stats",
 )
 _TIME_KEYS = ("last_online", "online_at", "connected_at", "last_connected_at", "updated_at", "created_at", "time", "timestamp", "date")
 _NON_UA_KEYS = {
@@ -309,9 +311,28 @@ def _extract_from_mapping(data: dict[str, Any]) -> str | None:
         if isinstance(value, str) and _is_probable_user_agent(value, key):
             return value.strip()
         if isinstance(value, dict):
+            if key in {"user_agents", "userAgents"}:
+                for agent_text in value.keys():
+                    if _is_probable_user_agent(agent_text, "user_agent"):
+                        return str(agent_text).strip()
+            for nested_key in ("value", "agent", "userAgent", "user_agent"):
+                nested_value = value.get(nested_key)
+                if isinstance(nested_value, str) and _is_probable_user_agent(nested_value, "user_agent"):
+                    return nested_value.strip()
             nested = _extract_from_mapping(value)
             if nested:
                 return nested
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, str) and _is_probable_user_agent(item, "user_agent"):
+                    return item.strip()
+            nested_items = [item for item in _collect_activity_mappings(value, parent_key=key) if isinstance(item, dict)]
+            if any(_timestamp_value(item) > 0 for item in nested_items):
+                nested_items = sorted(nested_items, key=_timestamp_value, reverse=True)
+            for item in nested_items:
+                nested = _extract_from_mapping(item)
+                if nested:
+                    return nested
     parts = []
     for key in _DEVICE_KEYS:
         value = data.get(key)
@@ -363,6 +384,32 @@ def log_user_agent_debug(username: str, user_data: dict[str, Any]) -> None:
     interesting_keys = (*_UA_KEYS, *_DEVICE_KEYS, *_TIME_KEYS, *_ACTIVITY_KEYS, "links", "subscription_url", "subscription", "sub_url", "configs")
     interesting = {key: redact_user_agent_debug_fields(user_data.get(key)) for key in interesting_keys if key in user_data}
     logger.debug("Marzban user-agent fields username=%s fields=%s", username, interesting)
+    if extract_last_user_agent(user_data) == "نامشخص":
+        logger.info(
+            "Marzban user-agent not found username=%s safe_payload_structure=%s",
+            username,
+            marzban_payload_debug_structure(user_data),
+        )
+
+
+def marzban_payload_debug_structure(value: Any, *, max_depth: int = 4, max_list_items: int = 3) -> Any:
+    """Return a token-safe payload key/type preview for live Marzban debugging."""
+    if max_depth < 0:
+        return "..."
+    if isinstance(value, dict):
+        preview = {}
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if lowered in _SECRET_KEYS or lowered in {"links", "link", "subscription", "subscription_url", "sub_url", "subscription_urls", "subscriptions", "configs"}:
+                preview[key] = "***"
+            elif isinstance(item, (dict, list)):
+                preview[key] = marzban_payload_debug_structure(item, max_depth=max_depth - 1, max_list_items=max_list_items)
+            else:
+                preview[key] = type(item).__name__
+        return preview
+    if isinstance(value, list):
+        return [marzban_payload_debug_structure(item, max_depth=max_depth - 1, max_list_items=max_list_items) for item in value[:max_list_items]]
+    return type(value).__name__
 
 
 def extract_last_user_agent(user_data: dict[str, Any]) -> str:
