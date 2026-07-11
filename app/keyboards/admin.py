@@ -10,6 +10,7 @@ def panel() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🗑 حذف کاربر مرزبان", callback_data="adm:mb:delete")],
         [InlineKeyboardButton(text="👥 یوزرهای ریسلر", callback_data="adm:reseller_users")],
         [InlineKeyboardButton(text="🧾 تراکنش‌ها", callback_data="adm:tx"), InlineKeyboardButton(text="🌐 اینباندها", callback_data="adm:inbounds")],
+        [InlineKeyboardButton(text="⚙️ تنظیمات تمدید", callback_data="adm:renewal_settings")],
         [InlineKeyboardButton(text="🛠 حالت تعمیرات", callback_data="adm:maintenance"), InlineKeyboardButton(text="💾 بکاپ", callback_data="adm:backup")],
     ])
 
@@ -189,4 +190,12 @@ def reseller_user_actions_keyboard(reseller_id: int, created_user_id: int, page:
         [InlineKeyboardButton(text="⏸ غیرفعال‌سازی", callback_data=f"adm:ru:act:{reseller_id}:{created_user_id}:disable:{page}")],
         [InlineKeyboardButton(text="بازگشت", callback_data=f"adm:ru:page:{reseller_id}:{page}")],
         [InlineKeyboardButton(text="🏠 پنل مدیریت", callback_data="adm:panel")],
+    ])
+
+
+def renewal_settings_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ انتخاب تمدید افزایشی", callback_data="adm:renewal:set:additive")],
+        [InlineKeyboardButton(text="🔄 انتخاب تمدید با ریست و جایگزینی", callback_data="adm:renewal:set:replace")],
+        [InlineKeyboardButton(text="بازگشت", callback_data="adm:panel")],
     ])
