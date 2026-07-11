@@ -110,6 +110,10 @@ class MarzbanClient:
     async def modify_user(self, username: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not self._token: await self.login()
         return await self._request("PUT", f"/api/user/{username}", json=payload)
+    async def reset_user_usage(self, username: str) -> Any:
+        """Reset one user's data usage via Marzban POST /api/user/{username}/reset."""
+        if not self._token: await self.login()
+        return await self._request("POST", f"/api/user/{username}/reset")
     async def disable_user(self, username: str) -> dict[str, Any]:
         # Marzban toggles user availability through PUT /api/user/{username};
         # the API status value for a temporarily inactive account is "disabled".
