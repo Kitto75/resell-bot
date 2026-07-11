@@ -105,6 +105,14 @@ class SettingsRepository:
     async def set_bool(self, key: str, value: bool) -> None:
         await self.set(key, "1" if value else "0")
 
+    async def get_renewal_mode(self) -> str:
+        from app.services.renewal import RENEWAL_MODE_KEY, normalize_renewal_mode
+        return normalize_renewal_mode(await self.get(RENEWAL_MODE_KEY)).value
+
+    async def set_renewal_mode(self, value: str) -> None:
+        from app.services.renewal import RENEWAL_MODE_KEY, normalize_renewal_mode
+        await self.set(RENEWAL_MODE_KEY, normalize_renewal_mode(value).value)
+
 
 class InboundRepository:
     def __init__(self, session: AsyncSession) -> None: self.session = session
