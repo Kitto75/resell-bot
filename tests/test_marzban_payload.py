@@ -376,3 +376,21 @@ class MarzbanUserAgentExtractorTests(unittest.TestCase):
         for payload in bad_values:
             with self.subTest(payload=payload):
                 self.assertEqual(extract_last_user_agent(payload), "نامشخص")
+
+class MarzbanResetUsageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reset_user_usage_uses_single_user_reset_endpoint(self):
+        from app.services.marzban import MarzbanClient
+
+        calls = []
+
+        class FakeClient(MarzbanClient):
+            async def login(self):
+                self._token = "token"
+            async def _request(self, method, path, **kwargs):
+                calls.append((method, path, kwargs))
+                return {"ok": True}
+
+        client = FakeClient("https://example.test", "admin", "password")
+        await client.reset_user_usage("alice")
+        self.assertEqual(calls[0][0], "POST")
+        self.assertEqual(calls[0][1], "/api/user/alice/reset")

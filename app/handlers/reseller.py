@@ -1,4 +1,3 @@
-from datetime import datetime, timezone
 import asyncio
 import logging
 from decimal import Decimal, InvalidOperation
@@ -7,13 +6,14 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, FSInputFile, Message
 from app.config import get_settings
 from app.database.models import OperationType, Reseller, ResellerStatus
-from app.database.repositories import CreatedUserRepository, InboundRepository, RechargeRepository
+from app.database.repositories import CreatedUserRepository, InboundRepository, RechargeRepository, SettingsRepository
 from app.database.session import SessionLocal
 from app.keyboards.admin import recharge_actions
 from app.keyboards.common import back_cancel, reseller_confirm
 from app.keyboards.reseller import created_user_actions, dashboard, my_users_pagination
 from app.services.billing import BYTES_PER_GB, BillingService
 from app.services.marzban import MarzbanClient, MarzbanError, create_payload_summary, extract_last_user_agent, on_hold_expire_duration, ownership_note, user_belongs_to_reseller
+from app.services.renewal import RenewalMode, calculate_renewal, renewal_mode_confirmation_text
 from app.services.qr import make_subscription_qr_png
 from app.services.reports import operation_report
 from app.services.validators import valid_username
@@ -414,7 +414,9 @@ async def renew_days(message: Message, state: FSMContext, reseller: Reseller) ->
     except ValueError: await message.answer("یک عدد معتبر وارد کنید."); return
     if days <= 0: await message.answer("روز باید بیشتر از صفر باشد."); return
     data = await state.update_data(days=days); cost = Decimal(data["gb"]) * reseller.price_per_gb
-    await state.set_state(RenewUser.confirm); await message.answer(f"خلاصه تمدید\nنام کاربری: {data['username']}\nحجم اضافه: {data['gb']} گیگابایت\nزمان اضافه: {days} روز\nهزینه: {format_toman(cost)}\nآیا تمدید تایید شود؟", reply_markup=reseller_confirm("res:renew:confirm", "res:renew", "✅ تایید تمدید"))
+    async with SessionLocal() as session:
+        mode = await SettingsRepository(session).get_renewal_mode()
+    await state.set_state(RenewUser.confirm); await message.answer(f"خلاصه تمدید\nنام کاربری: {data['username']}\nحجم واردشده: {data['gb']} گیگابایت\nزمان واردشده: {days} روز\nهزینه: {format_toman(cost)}\n\n{renewal_mode_confirmation_text(mode)}\n\nآیا تمدید تایید شود؟", reply_markup=reseller_confirm("res:renew:confirm", "res:renew", "✅ تایید تمدید"))
 
 @router.callback_query(RenewUser.confirm, F.data == "res:renew:confirm")
 async def renew_confirm(cb: CallbackQuery, state: FSMContext, reseller: Reseller) -> None:
@@ -423,11 +425,25 @@ async def renew_confirm(cb: CallbackQuery, state: FSMContext, reseller: Reseller
         db_reseller = await session.get(type(reseller), reseller.id); cost = BillingService(session).calculate_cost(gb, db_reseller.price_per_gb)
         if db_reseller.balance < cost: await cb.message.answer("موجودی کافی نیست."); await state.clear(); await cb.answer(); return
         try:
-            user = await client().get_user(username)
+            marzban = client()
+            mode = await SettingsRepository(session).get_renewal_mode()
+            user = await marzban.get_user(username)
             if not user_belongs_to_reseller(user, db_reseller.display_name): await cb.message.answer("این اکانت متعلق به شما نیست."); await state.clear(); await cb.answer(); return
-            base_expire = max(int(user.get("expire") or 0), int(datetime.now(timezone.utc).timestamp()))
-            await client().modify_user(username, {"data_limit": int(user.get("data_limit") or 0) + gb * BYTES_PER_GB, "expire": base_expire + days * 86400})
-        except MarzbanError as exc: await cb.message.answer(f"خطای مرزبان: {exc}"); await state.clear(); await cb.answer(); return
+            calc = calculate_renewal(user, gb, days, mode)
+            reset_succeeded = False
+            if calc.mode is RenewalMode.replace:
+                await marzban.reset_user_usage(username)
+                reset_succeeded = True
+            try:
+                await marzban.modify_user(username, {"data_limit": calc.resulting_data_limit, "expire": calc.resulting_expire})
+            except MarzbanError:
+                if reset_succeeded:
+                    logger.exception("Reseller Marzban renewal partially applied: usage reset succeeded but update failed telegram_id=%s reseller=%s username=%s", cb.from_user.id, db_reseller.display_name, username)
+                raise
+            logger.info("Reseller Marzban renewal mode=%s telegram_id=%s reseller=%s username=%s entered_gb=%s entered_days=%s previous_data_limit=%s previous_expire=%s resulting_data_limit=%s resulting_expire=%s usage_reset_succeeded=%s", calc.mode.value, cb.from_user.id, db_reseller.display_name, username, gb, days, calc.previous_data_limit, calc.previous_expire, calc.resulting_data_limit, calc.resulting_expire, reset_succeeded)
+        except MarzbanError:
+            logger.exception("Reseller Marzban renewal failed telegram_id=%s reseller=%s username=%s gb=%s days=%s", cb.from_user.id, db_reseller.display_name, username, gb, days)
+            await cb.message.answer("تمدید کاربر در مرزبان ناموفق بود. جزئیات امن خطا در لاگ ثبت شد."); await state.clear(); await cb.answer(); return
         log = await BillingService(session).charge_for_operation(db_reseller, username, OperationType.renew, gb, days, cb.from_user.id); report = operation_report(db_reseller, log)
     for admin_id in get_settings().admin_ids: await cb.bot.send_message(admin_id, report)
     await state.clear(); await cb.message.answer("✅ اکانت با موفقیت تمدید شد."); await cb.answer()
