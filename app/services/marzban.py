@@ -129,9 +129,7 @@ class MarzbanClient:
         prepared.setdefault("data_limit_reset_strategy", "no_reset")
         if prepared.get("proxies") and prepared.get("inbounds"):
             return prepare_create_payload(prepared, payload.get("validity_days"))
-        template = await self._create_template_from_existing_user(allowed_inbound_tags)
-        if template is None:
-            template = await self._create_template_from_inbounds(allowed_inbound_tags)
+        template = await self._create_template_from_inbounds(allowed_inbound_tags)
         prepared.update(template)
         return prepare_create_payload(prepared, payload.get("validity_days"))
     async def _create_template_from_existing_user(self, allowed_inbound_tags: list[str] | None = None) -> dict[str, Any] | None:
