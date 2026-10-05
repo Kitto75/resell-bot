@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio, logging
+from datetime import datetime, timezone
 from typing import Any
 import aiohttp
 from urllib.parse import urljoin
@@ -8,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 _SECRET_KEYS = {"token", "access_token", "authorization", "password", "passwd", "secret", "api_key", "apikey"}
 _INTERNAL_CREATE_KEYS = {"validity_days"}
-_SAFE_CREATE_KEYS = {"username", "status", "data_limit", "on_hold_expire_duration", "proxies", "inbounds", "data_limit_reset_strategy", "note"}
+_SAFE_CREATE_KEYS = {"username", "status", "data_limit", "on_hold_expire_duration", "group_ids", "data_limit_reset_strategy", "note"}
 _ON_HOLD_ACTIVATION_KEYS = {"expire", "on_hold_timeout", "on_hold_timeout_duration", "activation_deadline", "activate_at", "active_at"}
 
 class MarzbanError(RuntimeError):
@@ -42,24 +43,24 @@ class MarzbanClient:
         result = await self._request("POST", "/api/admin/token", data=data)
         self._token = result.get("access_token")
     async def get_inbounds(self) -> list[dict[str, Any]]:
+        """PasarGuard: access is controlled by groups, not inbounds.
+
+        The returned dicts keep the old shape ("tag"/"protocol") so the admin inbound
+        screen and the database keep working; "tag" is the group name.
+        """
         if not self._token: await self.login()
-        data = await self._request("GET", "/api/inbounds")
-        if isinstance(data, dict):
-            flattened: list[dict[str, Any]] = []
-            for protocol, items in data.items():
-                for item in (items if isinstance(items, list) else []):
-                    if isinstance(item, dict):
-                        flattened.append({"protocol": item.get("protocol") or protocol, **item})
-                    else:
-                        flattened.append({"protocol": protocol, "tag": str(item)})
-            return flattened
-        return data
+        data = await self._request("GET", "/api/groups")
+        groups = data.get("groups") if isinstance(data, dict) else data
+        return [
+            {"tag": str(g["name"]), "protocol": "group", "id": g["id"], "is_disabled": bool(g.get("is_disabled"))}
+            for g in (groups or []) if isinstance(g, dict) and g.get("id") is not None and g.get("name")
+        ]
     async def list_users(self, limit: int = 50) -> list[dict[str, Any]]:
         if not self._token: await self.login()
         data = await self._request("GET", f"/api/users?limit={limit}")
         if isinstance(data, dict):
             users = data.get("users") or data.get("items") or []
-            return [user for user in users if isinstance(user, dict)]
+            return [normalize_user(user) for user in users if isinstance(user, dict)]
         return [user for user in data if isinstance(user, dict)] if isinstance(data, list) else []
     def absolute_subscription_url(self, value: str | None) -> str | None:
         if not value or not value.strip():
@@ -70,7 +71,7 @@ class MarzbanClient:
         return urljoin(f"{self.base_url}/", value.lstrip("/"))
     async def get_user(self, username: str) -> dict[str, Any]:
         if not self._token: await self.login()
-        data = await self._request("GET", f"/api/user/{username}")
+        data = normalize_user(await self._request("GET", f"/api/user/{username}"))
         if isinstance(data, dict):
             log_user_agent_debug(username, data)
         return data
@@ -78,21 +79,18 @@ class MarzbanClient:
         data = await self.get_user(username)
         if not isinstance(data, dict):
             return data
-        # Marzban deployments differ; collect client/session details from optional endpoints when present.
-        for label, path in {
-            "usage_details": f"/api/user/{username}/usage",
-            "online_clients": f"/api/user/{username}/online_clients",
-            "statistics": f"/api/user/{username}/statistics",
-        }.items():
-            try:
-                extra = await self._request("GET", path)
-            except MarzbanError as exc:
-                if exc.status in {404, 405}:
-                    logger.debug("Marzban optional user-agent endpoint unavailable username=%s endpoint=%s status=%s", username, path, exc.status)
-                    continue
-                logger.warning("Marzban optional user-agent endpoint failed username=%s endpoint=%s status=%s", username, path, exc.status)
-                continue
-            data[label] = extra
+        # PasarGuard keeps the last subscription client in a separate endpoint.
+        try:
+            extra = await self._request("GET", f"/api/user/{username}/sub_update?limit=10")
+        except MarzbanError as exc:
+            logger.warning("PasarGuard sub_update fetch failed username=%s status=%s", username, exc.status)
+            return data
+        updates = [u for u in (extra.get("updates") or []) if isinstance(u, dict)] if isinstance(extra, dict) else []
+        if updates:
+            latest = max(updates, key=_timestamp_value)
+            agent = latest.get("user_agent")
+            if isinstance(agent, str) and agent.strip():
+                data["sub_last_user_agent"] = agent.strip()
         log_user_agent_debug(username, data)
         return data
     async def create_user(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -102,66 +100,79 @@ class MarzbanClient:
         logger.debug("Marzban create-user sanitized payload: %s", redact_secrets(sanitized_payload))
         logger.info("Marzban create-user attempt username=%s", sanitized_payload.get("username"))
         try:
-            return await self._request("POST", "/api/user", json=sanitized_payload, retry_5xx=False)
+            return normalize_user(await self._request("POST", "/api/user", json=sanitized_payload, retry_5xx=False))
         except MarzbanError as exc:
             if exc.status and exc.status >= 500:
                 logger.error("Marzban create-user returned %s. This may be a Marzban schema/payload rejection or internal API failure. body=%s payload_summary=%s", exc.status, exc.message, create_payload_summary(sanitized_payload))
             raise
     async def modify_user(self, username: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not self._token: await self.login()
-        return await self._request("PUT", f"/api/user/{username}", json=payload)
+        payload = dict(payload)
+        expire = payload.get("expire")
+        if isinstance(expire, int) and expire > 0:
+            # PasarGuard documents `expire` as a UTC datetime; send ISO-8601 to avoid ambiguity.
+            payload["expire"] = datetime.fromtimestamp(expire, timezone.utc).isoformat()
+        return normalize_user(await self._request("PUT", f"/api/user/{username}", json=payload))
     async def reset_user_usage(self, username: str) -> Any:
         """Reset one user's data usage via Marzban POST /api/user/{username}/reset."""
         if not self._token: await self.login()
         return await self._request("POST", f"/api/user/{username}/reset")
+    async def _set_disabled(self, username: str, disabled: bool) -> dict[str, Any]:
+        if not self._token: await self.login()
+        return normalize_user(await self._request("PUT", f"/api/user/{username}/disabled", json={"disabled": disabled}))
     async def disable_user(self, username: str) -> dict[str, Any]:
-        # Marzban toggles user availability through PUT /api/user/{username};
-        # the API status value for a temporarily inactive account is "disabled".
-        return await self.modify_user(username, {"status": "disabled"})
+        return await self._set_disabled(username, True)
     async def enable_user(self, username: str) -> dict[str, Any]:
-        # Sending only the status preserves data_limit, expire, note, inbounds, proxies and other settings.
-        return await self.modify_user(username, {"status": "active"})
+        return await self._set_disabled(username, False)
     async def delete_user(self, username: str) -> Any:
         if not self._token: await self.login()
         return await self._request("DELETE", f"/api/user/{username}")
     async def build_create_payload(self, payload: dict[str, Any], allowed_inbound_tags: list[str] | None = None) -> dict[str, Any]:
         prepared = {key: value for key, value in payload.items() if key not in _INTERNAL_CREATE_KEYS}
         prepared.setdefault("data_limit_reset_strategy", "no_reset")
-        if prepared.get("proxies") and prepared.get("inbounds"):
-            return prepare_create_payload(prepared, payload.get("validity_days"))
-        template = await self._create_template_from_inbounds(allowed_inbound_tags)
-        prepared.update(template)
+        if not prepared.get("group_ids"):
+            prepared["group_ids"] = await self._resolve_group_ids(allowed_inbound_tags)
         return prepare_create_payload(prepared, payload.get("validity_days"))
-    async def _create_template_from_existing_user(self, allowed_inbound_tags: list[str] | None = None) -> dict[str, Any] | None:
-        try:
-            users = await self.list_users(50)
-        except MarzbanError as exc:
-            logger.warning("Could not fetch Marzban sample users for create template status=%s", exc.status)
+    async def _resolve_group_ids(self, allowed_group_names: list[str] | None = None) -> list[int]:
+        # Empty/None allowed list means "all enabled groups" (same meaning as "all inbounds" before).
+        groups = await self.get_inbounds()
+        allowed = {str(name) for name in (allowed_group_names or [])}
+        ids = [g["id"] for g in groups if not g.get("is_disabled") and (not allowed or g["tag"] in allowed)]
+        if not ids:
+            raise MarzbanError("No PasarGuard groups are available to build create-user payload")
+        return ids
+
+def _to_timestamp(value: Any) -> Any:
+    """PasarGuard returns `expire` as an ISO datetime (or null); the rest of the bot expects a unix timestamp."""
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
             return None
-        allowed = set(allowed_inbound_tags or [])
-        for user in users:
-            proxies = user.get("proxies")
-            inbounds = _filter_inbounds(user.get("inbounds"), allowed)
-            if isinstance(proxies, dict) and proxies and inbounds:
-                logger.info("Using Marzban user template from existing user username=%s payload_summary=%s", user.get("username"), create_payload_summary({"proxies": proxies, "inbounds": inbounds}))
-                return {"proxies": proxies, "inbounds": inbounds}
-        return None
-    async def _create_template_from_inbounds(self, allowed_inbound_tags: list[str] | None = None) -> dict[str, Any]:
-        inbounds = await self.get_inbounds()
-        allowed = set(allowed_inbound_tags or [])
-        grouped: dict[str, list[str]] = {}
-        for inbound in inbounds:
-            if not isinstance(inbound, dict):
-                continue
-            tag = inbound.get("tag") or inbound.get("remark")
-            protocol = inbound.get("protocol") or inbound.get("type")
-            if not tag or not protocol or (allowed and str(tag) not in allowed):
-                continue
-            grouped.setdefault(str(protocol), []).append(str(tag))
-        if not grouped:
-            raise MarzbanError("No Marzban inbounds are available to build create-user payload")
-        proxies = {protocol: {} for protocol in grouped}
-        return {"proxies": proxies, "inbounds": grouped}
+        try:
+            return int(float(text))
+        except ValueError:
+            pass
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return value
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return int(parsed.timestamp())
+    return value
+
+
+def normalize_user(data: Any) -> Any:
+    if isinstance(data, dict):
+        for key in ("expire", "on_hold_timeout"):
+            if key in data:
+                data[key] = _to_timestamp(data[key])
+    return data
+
 
 def ownership_note(display_name: str) -> str:
     return f"belongs to {display_name}"
@@ -198,17 +209,13 @@ def _filter_inbounds(value: Any, allowed: set[str]) -> dict[str, list[str]]:
 
 
 def create_payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
-    inbounds = payload.get("inbounds") if isinstance(payload.get("inbounds"), dict) else {}
-    inbound_counts = {str(protocol): len(tags) for protocol, tags in inbounds.items() if isinstance(tags, list)}
     return {
         "username": payload.get("username"),
         "status": payload.get("status"),
         "data_limit": payload.get("data_limit"),
         "expire": payload.get("expire"),
         "on_hold_expire_duration": payload.get("on_hold_expire_duration"),
-        "proxies_keys": sorted((payload.get("proxies") or {}).keys()) if isinstance(payload.get("proxies"), dict) else [],
-        "inbound_tags_count": sum(inbound_counts.values()),
-        "inbound_counts": inbound_counts,
+        "group_ids": payload.get("group_ids"),
         "data_limit_reset_strategy": payload.get("data_limit_reset_strategy"),
         "note": payload.get("note"),
         "activation_keys_present": sorted(key for key in _ON_HOLD_ACTIVATION_KEYS if key in payload),
@@ -221,10 +228,8 @@ def prepare_create_payload(payload: dict[str, Any], validity_days: int | None = 
         logger.warning("Dropping unsafe Marzban create-user payload keys username=%s keys=%s", payload.get("username"), dropped_keys)
     prepared = {key: value for key, value in payload.items() if key in _SAFE_CREATE_KEYS}
     prepared.setdefault("data_limit_reset_strategy", "no_reset")
-    if not isinstance(prepared.get("proxies"), dict) or not prepared.get("proxies"):
-        raise ValueError("Marzban create-user payload requires non-empty proxies")
-    if not isinstance(prepared.get("inbounds"), dict) or not prepared.get("inbounds"):
-        raise ValueError("Marzban create-user payload requires non-empty inbounds")
+    if not isinstance(prepared.get("group_ids"), list) or not prepared.get("group_ids"):
+        raise ValueError("PasarGuard create-user payload requires non-empty group_ids")
     if prepared.get("status") == "on_hold":
         for key in _ON_HOLD_ACTIVATION_KEYS:
             prepared.pop(key, None)

@@ -17,8 +17,7 @@ class MarzbanCreatePayloadTests(unittest.TestCase):
             "username": "test_user",
             "status": "on_hold",
             "data_limit": 1024,
-            "proxies": {"vless": {}},
-            "inbounds": {"vless": ["VLESS TCP"]},
+            "group_ids": [1],
             "expire": 1_720_000_000,
             "validity_days": 30,
         }
@@ -32,7 +31,7 @@ class MarzbanCreatePayloadTests(unittest.TestCase):
 
     def test_existing_on_hold_duration_is_preserved_and_expire_removed(self):
         prepared = prepare_create_payload(
-            {"username": "test_user", "status": "on_hold", "expire": 1, "on_hold_expire_duration": 86_400, "proxies": {"vless": {}}, "inbounds": {"vless": ["VLESS TCP"]}},
+            {"username": "test_user", "status": "on_hold", "expire": 1, "on_hold_expire_duration": 86_400, "group_ids": [1]},
             validity_days=30,
         )
 
@@ -41,20 +40,19 @@ class MarzbanCreatePayloadTests(unittest.TestCase):
 
     def test_on_hold_duration_must_be_positive(self):
         with self.assertRaises(ValueError):
-            prepare_create_payload({"username": "test_user", "status": "on_hold", "on_hold_expire_duration": -1, "proxies": {"vless": {}}, "inbounds": {"vless": ["VLESS TCP"]}})
+            prepare_create_payload({"username": "test_user", "status": "on_hold", "on_hold_expire_duration": -1, "group_ids": [1]})
 
     def test_on_hold_expire_duration_converts_days_to_seconds(self):
         self.assertEqual(on_hold_expire_duration(30), 2_592_000)
 
-    def test_payload_requires_proxy_template(self):
+    def test_payload_requires_group_ids(self):
         with self.assertRaises(ValueError):
             prepare_create_payload({"username": "test_user", "status": "active"})
 
     def test_payload_summary_includes_schema_keys(self):
-        summary = create_payload_summary({"username": "u", "status": "on_hold", "data_limit": 1, "on_hold_expire_duration": 86400, "proxies": {"vless": {}, "vmess": {}}, "inbounds": {"vless": ["a", "b"]}, "data_limit_reset_strategy": "no_reset", "note": "belongs to r"})
+        summary = create_payload_summary({"username": "u", "status": "on_hold", "data_limit": 1, "on_hold_expire_duration": 86400, "group_ids": [1, 2], "data_limit_reset_strategy": "no_reset", "note": "belongs to r"})
 
-        self.assertEqual(summary["proxies_keys"], ["vless", "vmess"])
-        self.assertEqual(summary["inbound_tags_count"], 2)
+        self.assertEqual(summary["group_ids"], [1, 2])
         self.assertEqual(summary["data_limit_reset_strategy"], "no_reset")
 
     def test_redact_secrets_for_logging(self):
@@ -95,7 +93,7 @@ class MarzbanCreateUserTests(unittest.IsolatedAsyncioTestCase):
                 captured["json"] = kwargs["json"]
                 return {"ok": True}
 
-        await FakeClient("https://example.test", "admin", "pass").create_user({"username": "u", "status": "active", "proxies": {"vless": {}}, "inbounds": {"vless": ["VLESS TCP"]}})
+        await FakeClient("https://example.test", "admin", "pass").create_user({"username": "u", "status": "active", "group_ids": [1]})
 
         self.assertEqual(captured["method"], "POST")
         self.assertEqual(captured["path"], "/api/user")
@@ -121,46 +119,90 @@ class MarzbanCreateUserTests(unittest.IsolatedAsyncioTestCase):
         await client.enable_user("u")
         await client.delete_user("u")
 
-        self.assertEqual(calls[0], ("PUT", "/api/user/u", {"status": "disabled"}))
-        self.assertEqual(calls[1], ("PUT", "/api/user/u", {"status": "active"}))
+        self.assertEqual(calls[0], ("PUT", "/api/user/u/disabled", {"disabled": True}))
+        self.assertEqual(calls[1], ("PUT", "/api/user/u/disabled", {"disabled": False}))
         self.assertEqual(calls[2], ("DELETE", "/api/user/u", None))
 
 
 class MarzbanTemplateTests(unittest.IsolatedAsyncioTestCase):
-    async def test_build_create_payload_uses_existing_user_template(self):
+    GROUPS = [{"tag": "Premium", "protocol": "group", "id": 1, "is_disabled": False}, {"tag": "Standard", "protocol": "group", "id": 2, "is_disabled": False}, {"tag": "Old", "protocol": "group", "id": 3, "is_disabled": True}]
+
+    def _client(self):
         from app.services.marzban import MarzbanClient
+        groups = self.GROUPS
 
         class FakeClient(MarzbanClient):
             async def login(self):
                 self._token = "token"
 
-            async def list_users(self, limit=50):
-                return [{"username": "sample", "proxies": {"vless": {"flow": ""}}, "inbounds": {"vless": ["VLESS TCP", "VLESS WS"]}}]
+            async def get_inbounds(self):
+                return groups
 
-        payload = await FakeClient("https://example.test", "admin", "pass").build_create_payload({"username": "new", "status": "on_hold", "validity_days": 15}, ["VLESS TCP"])
+        return FakeClient("https://example.test", "admin", "pass")
 
-        self.assertEqual(payload["proxies"], {"vless": {"flow": ""}})
-        self.assertEqual(payload["inbounds"], {"vless": ["VLESS TCP"]})
+    async def test_build_create_payload_uses_allowed_group_names(self):
+        payload = await self._client().build_create_payload({"username": "new", "status": "on_hold", "validity_days": 15}, ["Standard"])
+
+        self.assertEqual(payload["group_ids"], [2])
         self.assertEqual(payload["data_limit_reset_strategy"], "no_reset")
         self.assertNotIn("expire", payload)
 
-    async def test_build_create_payload_falls_back_to_inbounds(self):
-        from app.services.marzban import MarzbanClient
+    async def test_build_create_payload_defaults_to_all_enabled_groups(self):
+        payload = await self._client().build_create_payload({"username": "new", "status": "on_hold", "validity_days": 1}, [])
+
+        self.assertEqual(payload["group_ids"], [1, 2])
+
+    async def test_build_create_payload_fails_when_no_group_matches(self):
+        from app.services.marzban import MarzbanError
+
+        with self.assertRaises(MarzbanError):
+            await self._client().build_create_payload({"username": "new", "status": "on_hold", "validity_days": 1}, ["Missing"])
+
+    def test_normalize_user_converts_iso_expire_to_timestamp(self):
+        from app.services.marzban import normalize_user
+
+        user = normalize_user({"expire": "2026-01-01T00:00:00+00:00", "on_hold_timeout": None})
+
+        self.assertEqual(user["expire"], 1767225600)
+        self.assertIsNone(user["on_hold_timeout"])
+
+class PasarGuardUserAgentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_latest_sub_update_user_agent_is_used(self):
+        from app.services.marzban import MarzbanClient, extract_last_user_agent
 
         class FakeClient(MarzbanClient):
             async def login(self):
                 self._token = "token"
 
-            async def list_users(self, limit=50):
-                return []
+            async def _request(self, method, path, *, retry_5xx=True, **kwargs):
+                if path.endswith("/sub_update?limit=10"):
+                    return {"count": 2, "updates": [
+                        {"created_at": "2026-01-01T10:00:00Z", "user_agent": "Hiddify/2.0"},
+                        {"created_at": "2026-01-02T10:00:00Z", "user_agent": "v2rayNG/1.9"},
+                    ]}
+                return {"username": "u", "status": "active", "expire": "2026-01-01T00:00:00+00:00"}
 
-            async def get_inbounds(self):
-                return [{"protocol": "vless", "tag": "VLESS TCP"}, {"protocol": "vmess", "tag": "VMess TCP"}]
+        info = await FakeClient("https://example.test", "admin", "pass").get_user_with_activity("u")
 
-        payload = await FakeClient("https://example.test", "admin", "pass").build_create_payload({"username": "new", "status": "on_hold", "validity_days": 1}, [])
+        self.assertEqual(extract_last_user_agent(info), "v2rayNG/1.9")
+        self.assertEqual(info["expire"], 1767225600)
 
-        self.assertEqual(payload["proxies"], {"vless": {}, "vmess": {}})
-        self.assertEqual(payload["inbounds"], {"vless": ["VLESS TCP"], "vmess": ["VMess TCP"]})
+    async def test_missing_sub_update_means_unknown(self):
+        from app.services.marzban import MarzbanClient, MarzbanError, extract_last_user_agent
+
+        class FakeClient(MarzbanClient):
+            async def login(self):
+                self._token = "token"
+
+            async def _request(self, method, path, *, retry_5xx=True, **kwargs):
+                if "sub_update" in path:
+                    raise MarzbanError("not found", 404)
+                return {"username": "u", "status": "active", "expire": None}
+
+        info = await FakeClient("https://example.test", "admin", "pass").get_user_with_activity("u")
+
+        self.assertEqual(extract_last_user_agent(info), "نامشخص")
+
 
 class MarzbanOnHoldSafetyTests(unittest.TestCase):
     def test_on_hold_payload_removes_activation_fields(self):
@@ -172,8 +214,7 @@ class MarzbanOnHoldSafetyTests(unittest.TestCase):
                 "on_hold_timeout": 123,
                 "activation_deadline": 456,
                 "on_hold_expire_duration": 86_400,
-                "proxies": {"vless": {}},
-                "inbounds": {"vless": ["VLESS TCP"]},
+                "group_ids": [1],
             },
             validity_days=1,
         )
@@ -197,13 +238,12 @@ class MarzbanOnHoldSafetyTests(unittest.TestCase):
                 "links": ["https://example.test/sub"],
                 "subscription_url": "https://example.test/sub",
                 "on_hold_expire_duration": 86_400,
-                "proxies": {"vless": {}},
-                "inbounds": {"vless": ["VLESS TCP"]},
+                "group_ids": [1],
             },
             validity_days=1,
         )
 
-        self.assertEqual(set(prepared), {"username", "status", "data_limit", "on_hold_expire_duration", "proxies", "inbounds", "data_limit_reset_strategy"})
+        self.assertEqual(set(prepared), {"username", "status", "data_limit", "on_hold_expire_duration", "group_ids", "data_limit_reset_strategy"})
         self.assertEqual(prepared["status"], "on_hold")
 
 
