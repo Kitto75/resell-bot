@@ -1,4 +1,7 @@
+import asyncio
+import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 from decimal import Decimal, InvalidOperation
 import logging
 from aiogram import F, Router
@@ -10,8 +13,11 @@ from app.config import get_settings
 from app.database.models import RechargeStatus, ResellerStatus, TransactionType
 from app.database.repositories import CreatedUserRepository, InboundRepository, RechargeRepository, ResellerRepository, SettingsRepository, TransactionRepository
 from app.database.session import SessionLocal
-from app.keyboards.admin import admin_back_cancel, backup_keyboard, balance_action_keyboard, confirm_keyboard, destructive_confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_reject_keyboard, renewal_settings_keyboard, resellers_keyboard, resellers_menu, status_keyboard, reseller_bulk_actions_keyboard, reseller_bulk_confirm_keyboard, reseller_user_actions_keyboard, reseller_users_page_keyboard, telegram_account_keyboard, telegram_accounts_actions, tx_filter_keyboard, tx_page_keyboard
+from app.keyboards.admin import report_period_keyboard, report_scope_keyboard, admin_back_cancel, backup_keyboard, balance_action_keyboard, confirm_keyboard, destructive_confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_reject_keyboard, renewal_settings_keyboard, resellers_keyboard, resellers_menu, status_keyboard, reseller_bulk_actions_keyboard, reseller_bulk_confirm_keyboard, reseller_user_actions_keyboard, reseller_users_page_keyboard, telegram_account_keyboard, telegram_accounts_actions, tx_filter_keyboard, tx_page_keyboard
 from app.services.qr import make_subscription_qr_png
+from app.services.datetime import jalali_filename_datetime
+from app.services.pdf_report import PdfFontError, PERIOD_LABELS, build_report_pdf, collect_report_data
+from app.services.reports import transactions_page_text
 from app.services.validators import valid_username
 from app.services.backup import get_backup_status, send_database_backup, set_backup_enabled, set_backup_interval, sqlite_backup_supported
 from app.services.billing import BYTES_PER_GB, BillingService
@@ -1001,11 +1007,47 @@ async def send_tx_page(message: Message, reseller_id: int, tx_type: str, page: i
         reseller = await ResellerRepository(session).get(reseller_id)
         txs = await TransactionRepository(session).recent(reseller_id, enum_type, PAGE_SIZE + 1, page * PAGE_SIZE)
     visible, has_next = txs[:PAGE_SIZE], len(txs) > PAGE_SIZE
-    lines = [f"تراکنش‌های {reseller.display_name if reseller else reseller_id}", f"فیلتر: {tx_type}", f"صفحه: {page + 1}", ""]
-    if not visible: lines.append("تراکنشی برای این انتخاب پیدا نشد.")
-    for tx in visible:
-        lines.append(f"#{tx.id} • {tx.type.value} • {format_toman(tx.amount)} • {format_toman(tx.balance_before)} → {format_toman(tx.balance_after)}\n{tx.created_at} • {tx.description or 'بدون توضیح'}")
-    await message.answer("\n".join(lines), reply_markup=tx_page_keyboard(reseller_id, tx_type, page, has_next))
+    text = transactions_page_text(reseller.display_name if reseller else str(reseller_id), tx_type, page, visible, get_settings().timezone)
+    await message.answer(text, reply_markup=tx_page_keyboard(reseller_id, tx_type, page, has_next))
+
+@router.callback_query(F.data == "adm:rpt")
+async def report_start(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    await state.clear()
+    async with SessionLocal() as session: resellers = await ResellerRepository(session).list()
+    await cb.message.answer("📄 گزارش PDF دسته‌بندی‌شده\nمحدوده گزارش را انتخاب کنید.", reply_markup=report_scope_keyboard(resellers)); await cb.answer()
+
+@router.callback_query(F.data.startswith("adm:rpt:s:"))
+async def report_scope(cb: CallbackQuery, is_admin: bool) -> None:
+    if not is_admin: return
+    scope = cb.data.rsplit(":", 1)[1]
+    await cb.message.answer("بازه زمانی گزارش را انتخاب کنید.", reply_markup=report_period_keyboard(scope)); await cb.answer()
+
+@router.callback_query(F.data.startswith("adm:rpt:go:"))
+async def report_generate(cb: CallbackQuery, is_admin: bool) -> None:
+    if not is_admin: return
+    try:
+        _, _, _, scope, period = cb.data.split(":")
+        reseller_id = None if scope == "all" else int(scope)
+    except ValueError:
+        await cb.answer("داده نامعتبر است.", show_alert=True); return
+    if period not in PERIOD_LABELS:
+        await cb.answer("بازه نامعتبر است.", show_alert=True); return
+    await cb.answer("در حال ساخت گزارش...")
+    settings = get_settings()
+    try:
+        async with SessionLocal() as session:
+            data = await collect_report_data(session, reseller_id, period, settings.timezone)
+        with tempfile.TemporaryDirectory() as tmp:
+            name = f"report-{'all' if reseller_id is None else f'reseller-{reseller_id}'}-{period}-{jalali_filename_datetime(settings.timezone)}.pdf"
+            path = await asyncio.to_thread(build_report_pdf, data, Path(tmp) / name, settings.pdf_font_path)
+            await cb.message.answer_document(FSInputFile(path, filename=name), caption=f"📄 گزارش دسته‌بندی‌شده\nمحدوده: {data.scope_label}\nبازه: {data.period_label}")
+    except PdfFontError:
+        logger.exception("PDF report font problem")
+        await cb.message.answer("❌ فونت فارسی روی سرور پیدا نشد.\nدستور زیر را روی سرور اجرا کنید و ربات را ریستارت کنید:\napt install -y fonts-vazirmatn", reply_markup=panel())
+    except Exception:
+        logger.exception("Failed to build PDF report scope=%s period=%s", scope, period)
+        await cb.message.answer("❌ ساخت گزارش PDF ناموفق بود. جزئیات در لاگ ثبت شد.", reply_markup=panel())
 
 def parse_recharge_callback(data: str | None) -> tuple[str, int] | None:
     parts = (data or "").split(":")

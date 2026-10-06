@@ -10,6 +10,7 @@ def panel() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🗑 حذف کاربر مرزبان", callback_data="adm:mb:delete")],
         [InlineKeyboardButton(text="👥 یوزرهای ریسلر", callback_data="adm:reseller_users")],
         [InlineKeyboardButton(text="🧾 تراکنش‌ها", callback_data="adm:tx"), InlineKeyboardButton(text="🌐 اینباندها", callback_data="adm:inbounds")],
+        [InlineKeyboardButton(text="📄 گزارش PDF", callback_data="adm:rpt")],
         [InlineKeyboardButton(text="⚙️ تنظیمات تمدید", callback_data="adm:renewal_settings")],
         [InlineKeyboardButton(text="🛠 حالت تعمیرات", callback_data="adm:maintenance"), InlineKeyboardButton(text="💾 بکاپ", callback_data="adm:backup")],
     ])
@@ -78,7 +79,7 @@ def tx_page_keyboard(reseller_id: int, tx_type: str, page: int, has_next: bool) 
     if page > 0: nav.append(InlineKeyboardButton(text="⬅️ قبلی", callback_data=f"adm:txpage:{reseller_id}:{tx_type}:{page-1}"))
     if has_next: nav.append(InlineKeyboardButton(text="بعدی ➡️", callback_data=f"adm:txpage:{reseller_id}:{tx_type}:{page+1}"))
     rows = [nav] if nav else []
-    rows.append([InlineKeyboardButton(text="🔎 تغییر فیلتر", callback_data=f"adm:txsel:{reseller_id}")])
+    rows.append([InlineKeyboardButton(text="🔎 تغییر فیلتر", callback_data=f"adm:txsel:{reseller_id}"), InlineKeyboardButton(text="📄 گزارش PDF", callback_data=f"adm:rpt:s:{reseller_id}")])
     rows.append([InlineKeyboardButton(text="⬅️ برگشت", callback_data="adm:tx"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -199,3 +200,17 @@ def renewal_settings_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🔄 انتخاب تمدید با ریست و جایگزینی", callback_data="adm:renewal:set:replace")],
         [InlineKeyboardButton(text="بازگشت", callback_data="adm:panel")],
     ])
+
+
+def report_scope_keyboard(resellers: list[Reseller]) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text="👥 همه ریسلرها", callback_data="adm:rpt:s:all")]]
+    rows += [[InlineKeyboardButton(text=r.display_name, callback_data=f"adm:rpt:s:{r.id}")] for r in resellers]
+    rows.append([InlineKeyboardButton(text="⬅️ برگشت", callback_data="adm:panel"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def report_period_keyboard(scope: str) -> InlineKeyboardMarkup:
+    periods = [("7d", "📅 ۷ روز اخیر"), ("30d", "📅 ۳۰ روز اخیر"), ("cur", "🗓 ماه شمسی جاری"), ("all", "♾ کل سوابق")]
+    rows = [[InlineKeyboardButton(text=label, callback_data=f"adm:rpt:go:{scope}:{key}")] for key, label in periods]
+    rows.append([InlineKeyboardButton(text="⬅️ برگشت", callback_data="adm:rpt"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)

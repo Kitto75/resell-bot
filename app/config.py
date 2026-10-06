@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     timezone: str = Field(default="Asia/Tehran", alias="TIMEZONE")
     default_language: str = Field(default="en", alias="DEFAULT_LANGUAGE")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    pdf_font_path: str | None = Field(default=None, alias="PDF_FONT_PATH")
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     @field_validator("admin_ids", mode="before")

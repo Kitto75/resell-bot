@@ -15,7 +15,7 @@ from app.services.billing import BYTES_PER_GB, BillingService
 from app.services.marzban import MarzbanClient, MarzbanError, create_payload_summary, extract_last_user_agent, on_hold_expire_duration, ownership_note, user_belongs_to_reseller
 from app.services.renewal import RenewalMode, calculate_renewal, renewal_mode_confirmation_text
 from app.services.qr import make_subscription_qr_png
-from app.services.reports import operation_report
+from app.services.reports import operation_report, recharge_request_text
 from app.services.validators import valid_username
 from app.states.reseller import CreateUser, Recharge, RenewUser, ToggleUserStatus
 from app.utils.formatting import format_bytes_to_gb, format_remaining_time, format_toman, status_fa
@@ -463,7 +463,7 @@ async def recharge_amount(message: Message, state: FSMContext) -> None:
 async def recharge_receipt(message: Message, state: FSMContext, reseller: Reseller) -> None:
     data = await state.get_data(); file_id = message.photo[-1].file_id if message.photo else None; text = message.caption or message.text
     async with SessionLocal() as session, session.begin(): req = await RechargeRepository(session).create(reseller.id, Decimal(data["amount"]), file_id, text)
-    caption = f"درخواست شارژ #{req.id}\nریسلر: {reseller.display_name}\nمبلغ: {format_toman(req.amount)}\nرسید: {text or 'تصویر'}"
+    caption = recharge_request_text(req.id, reseller.display_name, req.amount, text)
     for admin_id in get_settings().admin_ids:
         if file_id: await message.bot.send_photo(admin_id, file_id, caption=caption, reply_markup=recharge_actions(req.id))
         else: await message.bot.send_message(admin_id, caption, reply_markup=recharge_actions(req.id))
