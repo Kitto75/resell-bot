@@ -16,6 +16,7 @@ from app.services.marzban import MarzbanClient, MarzbanError, create_payload_sum
 from app.services.renewal import RenewalMode, calculate_renewal, renewal_mode_confirmation_text
 from app.services.qr import make_subscription_qr_png
 from app.services.reports import operation_report, recharge_request_text
+from app.services.user_info import reseller_activity_lines
 from app.services.validators import valid_username
 from app.states.reseller import CreateUser, Recharge, RenewUser, ToggleUserStatus
 from app.utils.formatting import format_bytes_to_gb, format_remaining_time, format_toman, status_fa
@@ -395,7 +396,7 @@ async def renew_username(message: Message, state: FSMContext, reseller: Reseller
     except MarzbanError as exc: await message.answer(f"دریافت اطلاعات کاربر ممکن نشد: {exc}"); return
     if not user_belongs_to_reseller(info, reseller.display_name): await message.answer("این اکانت متعلق به شما نیست."); return
     await state.update_data(username=username, info=info); await state.set_state(RenewUser.confirm_user)
-    await message.answer(f"اطلاعات اکانت\nنام کاربری: {username}\nحجم کل: {format_bytes_to_gb(info.get('data_limit'))}\nمصرف‌شده: {format_bytes_to_gb(info.get('used_traffic'))}\nباقی‌مانده: {format_bytes_to_gb(max(0, int(info.get('data_limit') or 0)-int(info.get('used_traffic') or 0)))}\nزمان باقی‌مانده: {format_remaining_time(info.get('expire'), info.get('remaining_seconds'), info.get('remaining_days'))}\nوضعیت: {status_fa(info.get('status'))}\nآخرین برنامه / User-Agent: {extract_last_user_agent(info)}", reply_markup=reseller_confirm("res:renew:user_confirm", "res:renew", "✅ تایید تمدید"))
+    await message.answer(f"اطلاعات اکانت\nنام کاربری: {username}\nحجم کل: {format_bytes_to_gb(info.get('data_limit'))}\nمصرف‌شده: {format_bytes_to_gb(info.get('used_traffic'))}\nباقی‌مانده: {format_bytes_to_gb(max(0, int(info.get('data_limit') or 0)-int(info.get('used_traffic') or 0)))}\nزمان باقی‌مانده: {format_remaining_time(info.get('expire'), info.get('remaining_seconds'), info.get('remaining_days'))}\nوضعیت: {status_fa(info.get('status'))}\nآخرین برنامه / User-Agent: {extract_last_user_agent(info)}\n{reseller_activity_lines(info)}", reply_markup=reseller_confirm("res:renew:user_confirm", "res:renew", "✅ تایید تمدید"))
 
 @router.callback_query(RenewUser.confirm_user, F.data == "res:renew:user_confirm")
 async def renew_confirm_user(cb: CallbackQuery, state: FSMContext) -> None:

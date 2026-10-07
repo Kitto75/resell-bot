@@ -91,6 +91,8 @@ class MarzbanClient:
             agent = latest.get("user_agent")
             if isinstance(agent, str) and agent.strip():
                 data["sub_last_user_agent"] = agent.strip()
+            if latest.get("created_at"):
+                data["sub_last_update_at"] = latest["created_at"]
         log_user_agent_debug(username, data)
         return data
     async def create_user(self, payload: dict[str, Any]) -> dict[str, Any]:
