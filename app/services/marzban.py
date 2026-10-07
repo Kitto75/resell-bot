@@ -62,6 +62,24 @@ class MarzbanClient:
             users = data.get("users") or data.get("items") or []
             return [normalize_user(user) for user in users if isinstance(user, dict)]
         return [user for user in data if isinstance(user, dict)] if isinstance(data, list) else []
+    async def list_users_by_usernames(self, usernames: list[str], chunk_size: int = 100) -> list[dict[str, Any]]:
+        """Fetch many users (with id/status) in a few requests instead of one request per user."""
+        if not self._token: await self.login()
+        found: list[dict[str, Any]] = []
+        for start in range(0, len(usernames), chunk_size):
+            chunk = usernames[start:start + chunk_size]
+            params = [("usernames", name) for name in chunk] + [("limit", str(len(chunk)))]
+            data = await self._request("GET", "/api/users", params=params)
+            users = data.get("users") if isinstance(data, dict) else data
+            found.extend(normalize_user(user) for user in (users or []) if isinstance(user, dict))
+        return found
+    async def bulk_set_disabled(self, ids: list[int], disabled: bool) -> list[str]:
+        """One request for many users. Returns the usernames the panel says it changed."""
+        if not self._token: await self.login()
+        path = "/api/users/bulk/disable" if disabled else "/api/users/bulk/enable"
+        data = await self._request("POST", path, json={"ids": [int(i) for i in ids]})
+        names = data.get("users") if isinstance(data, dict) else None
+        return [str(name) for name in (names or [])]
     def absolute_subscription_url(self, value: str | None) -> str | None:
         if not value or not value.strip():
             return None

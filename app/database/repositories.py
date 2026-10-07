@@ -1,8 +1,8 @@
 import builtins
 from decimal import Decimal
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.database.models import BalanceTransaction, BotSetting, CreatedUser, RechargeRequest, Reseller, ResellerInbound, ResellerStatus, ResellerTelegramAccount, TransactionType
+from app.database.models import BalanceTransaction, BotSetting, CreatedUser, OperationLog, RechargeRequest, Reseller, ResellerInbound, ResellerStatus, ResellerTelegramAccount, TransactionType
 
 
 class ResellerRepository:
@@ -51,6 +51,18 @@ class ResellerRepository:
         await self.session.flush(); return account
     async def count_users(self, reseller_id: int) -> int:
         return int(await self.session.scalar(select(func.count(CreatedUser.id)).where(CreatedUser.reseller_id == reseller_id)) or 0)
+    async def record_counts(self, reseller_id: int) -> dict[str, int]:
+        async def count(model) -> int:
+            return int(await self.session.scalar(select(func.count(model.id)).where(model.reseller_id == reseller_id)) or 0)
+        return {"users": await count(CreatedUser), "transactions": await count(BalanceTransaction), "operations": await count(OperationLog), "recharges": await count(RechargeRequest)}
+    async def delete_permanently(self, reseller_id: int) -> bool:
+        """Remove the reseller and every local record of it (panel accounts are NOT touched).
+        Children are deleted explicitly so it works even when SQLite foreign keys are off."""
+        if await self.session.get(Reseller, reseller_id) is None: return False
+        for model in (BalanceTransaction, RechargeRequest, ResellerInbound, CreatedUser, OperationLog, ResellerTelegramAccount):
+            await self.session.execute(delete(model).where(model.reseller_id == reseller_id))
+        await self.session.execute(delete(Reseller).where(Reseller.id == reseller_id))
+        self.session.expire_all(); return True
 
 
 class CreatedUserRepository:
