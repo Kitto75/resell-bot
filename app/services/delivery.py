@@ -14,6 +14,7 @@ from app.services.reports import RLM
 logger = logging.getLogger(__name__)
 BYTES_PER_GB = 1024 ** 3
 CAPTION_LIMIT = 1024  # Telegram photo caption limit (visible characters)
+SUB_MONO_KEY = "sub_link_mono"  # bot_settings key: "1" = send the link in monospace (default), "0" = plain text
 STATUS_ICON = {"active": "🟢", "on_hold": "🕒", "disabled": "⛔", "expired": "⌛", "limited": "📉"}
 
 
@@ -40,8 +41,24 @@ def account_line(username: str, data_limit: Any, days: int | None = None) -> str
     return f"{username} | {limit_text(data_limit, spaced=True)} | {days_text(days)}"
 
 
-def build_caption(username: str, data_limit: Any, subscription_url: str, days: int | None = None) -> str:
-    return f"{escape(account_line(username, data_limit, days))}\n\n<code>{escape(subscription_url)}</code>"
+def link_html(subscription_url: str, mono: bool = True) -> str:
+    return f"<code>{escape(subscription_url)}</code>" if mono else escape(subscription_url)
+
+
+def build_caption(username: str, data_limit: Any, subscription_url: str, days: int | None = None, mono: bool = True) -> str:
+    return f"{escape(account_line(username, data_limit, days))}\n\n{link_html(subscription_url, mono)}"
+
+
+async def is_mono_enabled() -> bool:
+    """Admin setting «تنظیمات سابسکریپشن». Defaults to ON (also if the database can't be read)."""
+    try:
+        from app.database.repositories import SettingsRepository
+        from app.database.session import SessionLocal
+        async with SessionLocal() as session:
+            return await SettingsRepository(session).get_bool(SUB_MONO_KEY, True)
+    except Exception:
+        logger.exception("Could not read the subscription link format setting; using monospace")
+        return True
 
 
 def _qr_png_bytes(url: str, username: str) -> bytes:
@@ -52,13 +69,15 @@ def _qr_png_bytes(url: str, username: str) -> bytes:
         path.unlink(missing_ok=True)
 
 
-async def send_account_message(message: Message, *, username: str, data_limit: Any, subscription_url: str | None, days: int | None = None, reply_markup: InlineKeyboardMarkup | None = None) -> None:
-    """Everything in ONE message: QR image, "name | limit [| days]" and the link in monospace (tap to copy)."""
+async def send_account_message(message: Message, *, username: str, data_limit: Any, subscription_url: str | None, days: int | None = None, reply_markup: InlineKeyboardMarkup | None = None, mono: bool | None = None) -> None:
+    """Everything in ONE message: QR image, "name | limit [| days]" and the link (monospace unless the admin turned it off)."""
+    if mono is None:
+        mono = await is_mono_enabled()
     line = account_line(username, data_limit, days)
     if not subscription_url:
         await message.answer(f"{line}\n\nلینک اشتراک در پاسخ پنل پیدا نشد؛ لطفاً از پنل بررسی کنید.", reply_markup=reply_markup)
         return
-    caption = build_caption(username, data_limit, subscription_url, days)
+    caption = build_caption(username, data_limit, subscription_url, days, mono)
     try:
         png = await asyncio.to_thread(_qr_png_bytes, subscription_url, username)
     except Exception:
@@ -68,7 +87,7 @@ async def send_account_message(message: Message, *, username: str, data_limit: A
     photo = BufferedInputFile(png, filename=f"{username}_subscription.png")
     if len(line) + 2 + len(subscription_url) > CAPTION_LIMIT:  # extremely long link: keep the QR, send the link right below
         await message.answer_photo(photo, caption=escape(line), parse_mode="HTML")
-        await message.answer(f"<code>{escape(subscription_url)}</code>", parse_mode="HTML", reply_markup=reply_markup)
+        await message.answer(link_html(subscription_url, mono), parse_mode="HTML", reply_markup=reply_markup)
         return
     await message.answer_photo(photo, caption=caption, parse_mode="HTML", reply_markup=reply_markup)
 

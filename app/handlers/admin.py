@@ -14,8 +14,8 @@ from app.config import get_settings
 from app.database.models import RechargeStatus, ResellerStatus, TransactionType
 from app.database.repositories import CreatedUserRepository, InboundRepository, RechargeRepository, ResellerRepository, SettingsRepository, TransactionRepository
 from app.database.session import SessionLocal
-from app.keyboards.admin import group_access_keyboard, reseller_card_keyboard, reseller_delete_keyboard, reseller_hard_delete_keyboard, reseller_list_keyboard, report_period_keyboard, report_scope_keyboard, admin_back_cancel, backup_keyboard, balance_action_keyboard, confirm_keyboard, destructive_confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_reject_keyboard, renewal_settings_keyboard, resellers_keyboard, resellers_menu, status_keyboard, reseller_bulk_actions_keyboard, reseller_bulk_confirm_keyboard, reseller_user_actions_keyboard, reseller_users_page_keyboard, telegram_account_keyboard, telegram_accounts_actions, tx_filter_keyboard, tx_page_keyboard
-from app.services.delivery import send_account_message
+from app.keyboards.admin import group_access_keyboard, subscription_settings_keyboard, reseller_card_keyboard, reseller_delete_keyboard, reseller_hard_delete_keyboard, reseller_list_keyboard, report_period_keyboard, report_scope_keyboard, admin_back_cancel, backup_keyboard, balance_action_keyboard, confirm_keyboard, destructive_confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_reject_keyboard, renewal_settings_keyboard, resellers_keyboard, resellers_menu, status_keyboard, reseller_bulk_actions_keyboard, reseller_bulk_confirm_keyboard, reseller_user_actions_keyboard, reseller_users_page_keyboard, telegram_account_keyboard, telegram_accounts_actions, tx_filter_keyboard, tx_page_keyboard
+from app.services.delivery import SUB_MONO_KEY, send_account_message
 from app.services.datetime import jalali_datetime_text, jalali_filename_datetime
 from app.services.bulk_users import build_plan, execute_plan, fetch_plan
 from app.services.reseller_view import PAGE_SIZE as RESELLER_PAGE_SIZE, ResellerRow, delete_choice_text, group_access_text, group_summary, hard_delete_confirm_text, reseller_card_text, reseller_list_text
@@ -985,6 +985,41 @@ async def balance_confirm(cb: CallbackQuery, state: FSMContext, is_admin: bool) 
             delta = amount if action == 'increase' else -amount
             await BillingService(session).change_balance(reseller, delta, TransactionType(action), f"تغییر دستی موجودی توسط مدیر: {action}", cb.from_user.id)
     await state.clear(); await cb.message.answer("✅ موجودی به‌روزرسانی شد.", reply_markup=panel()); await cb.answer()
+
+def _subscription_settings_text(mono_enabled: bool) -> str:
+    return "\n".join([
+        "🔗 تنظیمات سابسکریپشن",
+        "━━━━━━━━━━━━━━",
+        f"ارسال لینک اشتراک به‌صورت Mono: {'✅ روشن' if mono_enabled else '⬜ خاموش'}",
+        "",
+        "• روشن: لینک داخل کادر mono می‌آید و با یک لمس کپی می‌شود.",
+        "• خاموش: لینک به‌صورت متن عادی ارسال می‌شود.",
+        "",
+        "این تنظیم روی همه‌ی پیام‌های لینک اشتراک اثر دارد: ساخت اکانت و دریافت لینک و QR، هم برای ریسلرها و هم برای مدیر.",
+    ])
+
+
+@router.callback_query(F.data == "adm:subset")
+async def subscription_settings_cb(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    await state.clear()
+    async with SessionLocal() as session: enabled = await SettingsRepository(session).get_bool(SUB_MONO_KEY, True)
+    await edit_or_answer(cb, _subscription_settings_text(enabled), subscription_settings_keyboard(enabled)); await cb.answer()
+
+
+@router.callback_query(F.data == "adm:subset:toggle")
+async def subscription_settings_toggle(cb: CallbackQuery, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    async with SessionLocal() as session, session.begin():
+        repo = SettingsRepository(session)
+        enabled = not await repo.get_bool(SUB_MONO_KEY, True)
+        await repo.set_bool(SUB_MONO_KEY, enabled)
+    logger.info("Admin changed subscription link mono format admin_id=%s mono=%s", cb.from_user.id, enabled)
+    await edit_or_answer(cb, _subscription_settings_text(enabled), subscription_settings_keyboard(enabled))
+    await cb.answer("✅ روشن شد." if enabled else "✅ خاموش شد.")
+
 
 @router.message(Command("maintenance"))
 async def maintenance_cmd(message: Message, state: FSMContext, is_admin: bool) -> None:

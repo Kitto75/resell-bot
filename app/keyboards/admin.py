@@ -11,7 +11,7 @@ def panel() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="👥 یوزرهای ریسلر", callback_data="adm:reseller_users")],
         [InlineKeyboardButton(text="🧾 تراکنش‌ها", callback_data="adm:tx"), InlineKeyboardButton(text="🌐 دسترسی گروه‌ها", callback_data="adm:inbounds")],
         [InlineKeyboardButton(text="📄 گزارش PDF", callback_data="adm:rpt")],
-        [InlineKeyboardButton(text="⚙️ تنظیمات تمدید", callback_data="adm:renewal_settings")],
+        [InlineKeyboardButton(text="⚙️ تنظیمات تمدید", callback_data="adm:renewal_settings"), InlineKeyboardButton(text="🔗 تنظیمات سابسکریپشن", callback_data="adm:subset")],
         [InlineKeyboardButton(text="🛠 حالت تعمیرات", callback_data="adm:maintenance"), InlineKeyboardButton(text="💾 بکاپ", callback_data="adm:backup")],
     ])
 
@@ -279,3 +279,11 @@ def group_access_keyboard(names: list[str], selected: list[str], mode: str) -> I
     rows.append([InlineKeyboardButton(text="💾 ذخیره", callback_data="adm:inb:save")])
     rows.append([InlineKeyboardButton(text="⬅️ برگشت", callback_data="adm:inbounds"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def subscription_settings_keyboard(mono_enabled: bool) -> InlineKeyboardMarkup:
+    toggle = "⬜ خاموش کردن Mono" if mono_enabled else "✅ روشن کردن Mono"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=toggle, callback_data="adm:subset:toggle")],
+        [InlineKeyboardButton(text="⬅️ پنل مدیریت", callback_data="adm:panel")],
+    ])
