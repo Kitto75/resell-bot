@@ -1,0 +1,537 @@
+diff --git a/app/handlers/admin.py b/app/handlers/admin.py
+index 35b881e..b6e738b 100644
+--- a/app/handlers/admin.py
++++ b/app/handlers/admin.py
+@@ -15,7 +15,7 @@ from app.database.models import RechargeStatus, ResellerStatus, TransactionType
+ from app.database.repositories import CreatedUserRepository, InboundRepository, RechargeRepository, ResellerRepository, SettingsRepository, TransactionRepository
+ from app.database.session import SessionLocal
+ from app.keyboards.admin import group_access_keyboard, reseller_card_keyboard, reseller_delete_keyboard, reseller_hard_delete_keyboard, reseller_list_keyboard, report_period_keyboard, report_scope_keyboard, admin_back_cancel, backup_keyboard, balance_action_keyboard, confirm_keyboard, destructive_confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_reject_keyboard, renewal_settings_keyboard, resellers_keyboard, resellers_menu, status_keyboard, reseller_bulk_actions_keyboard, reseller_bulk_confirm_keyboard, reseller_user_actions_keyboard, reseller_users_page_keyboard, telegram_account_keyboard, telegram_accounts_actions, tx_filter_keyboard, tx_page_keyboard
+-from app.services.qr import make_subscription_qr_png
++from app.services.delivery import send_account_message
+ from app.services.datetime import jalali_datetime_text, jalali_filename_datetime
+ from app.services.bulk_users import build_plan, execute_plan, fetch_plan
+ from app.services.reseller_view import PAGE_SIZE as RESELLER_PAGE_SIZE, ResellerRow, delete_choice_text, group_access_text, group_summary, hard_delete_confirm_text, reseller_card_text, reseller_list_text
+@@ -67,27 +67,8 @@ def _primary_subscription_url(user: dict | None) -> str | None:
+     return None
+ 
+ 
+-async def _send_admin_create_success(message: Message, username: str, subscription_url: str | None) -> None:
+-    if not subscription_url:
+-        await message.answer(
+-            f"✅ کاربر با موفقیت ساخته شد.\n\n👤 نام کاربری:\n{username}\n\nلینک اشتراک در پاسخ پنل پیدا نشد؛ لطفاً از پنل بررسی کنید.",
+-            reply_markup=panel(),
+-        )
+-        return
+-    await message.answer(
+-        f"✅ کاربر با موفقیت ساخته شد.\n\n👤 نام کاربری:\n{username}\n\n🔗 لینک اشتراک:\n{subscription_url}",
+-        reply_markup=panel(),
+-    )
+-    qr_path = None
+-    try:
+-        qr_path = make_subscription_qr_png(subscription_url, username)
+-        await message.answer_photo(FSInputFile(qr_path, filename=f"{username}_subscription.png"), caption="📱 QR Code\nکد را با کلاینت VPN اسکن کنید.")
+-    except Exception:
+-        logger.exception("Failed to generate/send admin subscription QR username=%s", username)
+-        await message.answer("لینک اشتراک ارسال شد، اما ساخت QR Code ناموفق بود.")
+-    finally:
+-        if qr_path is not None:
+-            qr_path.unlink(missing_ok=True)
++async def _send_admin_create_success(message: Message, username: str, subscription_url: str | None, data_limit: int, days: int) -> None:
++    await send_account_message(message, username=username, data_limit=data_limit, subscription_url=subscription_url, days=days, reply_markup=panel())
+ 
+ 
+ def _admin_user_info_text(info: dict) -> str:
+@@ -306,7 +287,7 @@ async def admin_create_marzban_confirm(cb: CallbackQuery, state: FSMContext, is_
+         logger.exception("Admin Marzban create failed username=%s payload_summary=%s", username, create_payload_summary(payload))
+         await cb.message.answer("ساخت کاربر در پنل ناموفق بود. جزئیات امن خطا در لاگ ثبت شد.", reply_markup=panel()); await state.clear(); await cb.answer(); return
+     subscription_url = marzban.absolute_subscription_url(_primary_subscription_url(created_user))
+-    await state.clear(); await _send_admin_create_success(cb.message, username, subscription_url); await cb.answer()
++    await state.clear(); await _send_admin_create_success(cb.message, username, subscription_url, gb * BYTES_PER_GB, days); await cb.answer()
+ 
+ 
+ @router.callback_query(F.data == "adm:mb:renew")
+diff --git a/app/handlers/admin_search.py b/app/handlers/admin_search.py
+index 93eac78..cd31a2f 100644
+--- a/app/handlers/admin_search.py
++++ b/app/handlers/admin_search.py
+@@ -6,12 +6,13 @@ so it can never interfere with create/renew/recharge/... flows that are waiting
+ import logging
+ import re
+ 
+-from aiogram import Router
++from aiogram import F, Router
+ from aiogram.filters import Command, StateFilter
+-from aiogram.types import Message
++from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+ 
+ from app.config import get_settings
+-from app.handlers.admin import client
++from app.handlers.admin import _primary_subscription_url, client
++from app.services.delivery import send_account_message
+ from app.services.marzban import MarzbanError
+ from app.services.user_info import format_admin_user_info
+ 
+@@ -29,6 +30,13 @@ async def _is_admin_username_text(message: Message, is_admin: bool = False) -> b
+     return bool(is_admin) and _lookup_username(message.text) is not None
+ 
+ 
++def _qr_keyboard(username: str) -> InlineKeyboardMarkup | None:
++    data = f"adm:qr:{username}"
++    if len(data.encode()) > 64:  # Telegram callback_data limit
++        return None
++    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📱 QR Code", callback_data=data)]])
++
++
+ async def _send_lookup(message: Message, username: str) -> None:
+     try:
+         info = await client().get_user_with_activity(username)
+@@ -39,7 +47,7 @@ async def _send_lookup(message: Message, username: str) -> None:
+             logger.exception("Admin user lookup failed username=%s status=%s", username, exc.status)
+             await message.answer("❌ دریافت اطلاعات از پنل ناموفق بود. لاگ‌ها را بررسی کنید.")
+         return
+-    await message.answer(format_admin_user_info(info, get_settings().timezone))
++    await message.answer(format_admin_user_info(info, get_settings().timezone), reply_markup=_qr_keyboard(username))
+ 
+ 
+ @router.message(Command("user"))
+@@ -57,3 +65,19 @@ async def admin_user_command(message: Message, is_admin: bool) -> None:
+ @router.message(StateFilter(None), _is_admin_username_text)
+ async def admin_user_search(message: Message) -> None:
+     await _send_lookup(message, _lookup_username(message.text))
++
++
++@router.callback_query(F.data.startswith("adm:qr:"))
++async def admin_user_qr(cb: CallbackQuery, is_admin: bool) -> None:
++    if not is_admin:
++        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
++    username = (cb.data or "").split(":", 2)[2]
++    await cb.answer()
++    marzban = client()
++    try:
++        info = await marzban.get_user(username)
++    except MarzbanError as exc:
++        logger.exception("Admin QR lookup failed username=%s status=%s", username, exc.status)
++        await cb.message.answer(f"❌ کاربری با نام «{username}» پیدا نشد." if exc.status == 404 else "❌ دریافت اطلاعات از پنل ناموفق بود.")
++        return
++    await send_account_message(cb.message, username=username, data_limit=info.get("data_limit"), subscription_url=marzban.absolute_subscription_url(_primary_subscription_url(info)))
+diff --git a/app/handlers/reseller.py b/app/handlers/reseller.py
+index 43413dc..4627934 100644
+--- a/app/handlers/reseller.py
++++ b/app/handlers/reseller.py
+@@ -14,11 +14,11 @@ from app.keyboards.reseller import created_user_actions, dashboard, my_users_pag
+ from app.services.billing import BYTES_PER_GB, BillingService
+ from app.services.marzban import MarzbanClient, MarzbanError, create_payload_summary, extract_last_user_agent, on_hold_expire_duration, ownership_note, user_belongs_to_reseller
+ from app.services.renewal import RenewalMode, calculate_renewal, renewal_mode_confirmation_text
+-from app.services.qr import make_subscription_qr_png
++from app.services.delivery import accounts_list_text, send_account_message
+ from app.services.reports import operation_report, recharge_request_text
+ from app.services.user_info import reseller_activity_lines
+ from app.services.validators import valid_username
+-from app.states.reseller import CreateUser, Recharge, RenewUser, ToggleUserStatus
++from app.states.reseller import CreateUser, MyUsers, Recharge, RenewUser, ToggleUserStatus
+ from app.utils.formatting import format_bytes_to_gb, format_remaining_time, format_toman, status_fa
+ 
+ router = Router()
+@@ -49,18 +49,7 @@ async def fetch_marzban_user(marzban: MarzbanClient, username: str) -> dict | No
+ 
+ 
+ 
+-def _my_users_text(usernames: list[str], page: int, has_next: bool) -> str:
+-    if not usernames:
+-        return "هنوز هیچ اکانتی توسط شما ساخته نشده است."
+-    start = page * MY_USERS_PAGE_SIZE
+-    lines = ["📋 اکانت‌های ساخته‌شده شما", ""]
+-    lines.extend(f"{start + idx}. {username}" for idx, username in enumerate(usernames, 1))
+-    if has_next:
+-        lines.extend(["", "برای دیدن ادامه لیست، روی «نمایش بیشتر» بزنید."])
+-    return "\n".join(lines)
+-
+-
+-async def send_my_users_page(cb: CallbackQuery, reseller: Reseller, page: int) -> None:
++async def send_my_users_page(cb: CallbackQuery, reseller: Reseller, page: int) -> bool:
+     async with SessionLocal() as session:
+         users = await CreatedUserRepository(session).list_by_reseller(
+             reseller.id,
+@@ -68,9 +57,16 @@ async def send_my_users_page(cb: CallbackQuery, reseller: Reseller, page: int) -
+             offset=page * MY_USERS_PAGE_SIZE,
+         )
+     has_next = len(users) > MY_USERS_PAGE_SIZE
+-    page_users = users[:MY_USERS_PAGE_SIZE]
+-    usernames = [user.username for user in page_users]
+-    await cb.message.answer(_my_users_text(usernames, page, has_next), reply_markup=my_users_pagination(page, has_next))
++    usernames = [user.username for user in users[:MY_USERS_PAGE_SIZE]]
++    details: dict[str, dict] = {}
++    if usernames:
++        try:  # one request for the whole page: status + volume next to every name
++            details = {str(u.get("username")): u for u in await client().list_users_by_usernames(usernames)}
++        except MarzbanError:
++            logger.exception("Could not read account details for the reseller list reseller_id=%s", reseller.id)
++    rows = [(name, str(getattr(details[name].get("status"), "value", details[name].get("status"))) if name in details else None, details[name].get("data_limit") if name in details else None) for name in usernames]
++    await cb.message.answer(accounts_list_text(rows, page, has_next), reply_markup=my_users_pagination(page, has_next), parse_mode="HTML")
++    return bool(usernames)
+ 
+ def primary_subscription_url(user: dict | None) -> str | None:
+     if not isinstance(user, dict):
+@@ -91,27 +87,8 @@ def primary_subscription_url(user: dict | None) -> str | None:
+     return None
+ 
+ 
+-async def send_create_success_to_reseller(cb: CallbackQuery, username: str, subscription_url: str | None) -> None:
+-    if not subscription_url:
+-        await cb.message.answer(
+-            f"✅ اکانت با موفقیت ساخته شد.\n\n👤 نام کاربری:\n{username}\n\nلینک اشتراک در پاسخ پنل پیدا نشد؛ لطفاً از پنل بررسی کنید.",
+-            reply_markup=created_user_actions(),
+-        )
+-        return
+-    await cb.message.answer(
+-        f"✅ اکانت با موفقیت ساخته شد.\n\n👤 نام کاربری:\n{username}\n\n🔗 لینک اشتراک:\n{subscription_url}",
+-        reply_markup=created_user_actions(),
+-    )
+-    qr_path = None
+-    try:
+-        qr_path = make_subscription_qr_png(subscription_url, username)
+-        await cb.message.answer_photo(FSInputFile(qr_path, filename=f"{username}_subscription.png"), caption="📱 QR Code\nکد را با کلاینت VPN اسکن کنید.")
+-    except Exception:
+-        logger.exception("Failed to generate/send subscription QR username=%s", username)
+-        await cb.message.answer("لینک اشتراک ارسال شد، اما ساخت QR Code ناموفق بود.")
+-    finally:
+-        if qr_path is not None:
+-            qr_path.unlink(missing_ok=True)
++async def send_create_success_to_reseller(cb: CallbackQuery, username: str, subscription_url: str | None, data_limit: int, days: int) -> None:
++    await send_account_message(cb.message, username=username, data_limit=data_limit, subscription_url=subscription_url, days=days, reply_markup=created_user_actions())
+ 
+ def _user_is_online(user: dict) -> bool:
+     for key in ("online", "is_online"):
+@@ -249,9 +226,31 @@ async def my_users_list(cb: CallbackQuery, state: FSMContext, reseller: Reseller
+         await cb.answer("درخواست نامعتبر است.", show_alert=True); return
+     if page < 0:
+         await cb.answer("درخواست نامعتبر است.", show_alert=True); return
+-    await send_my_users_page(cb, reseller, page)
++    has_accounts = await send_my_users_page(cb, reseller, page)
++    if has_accounts: await state.set_state(MyUsers.lookup)  # next text message = exact username to fetch link + QR
+     await cb.answer()
+ 
++ACCOUNT_NOT_FOUND = "اکانتی با این نام در لیست اکانت‌های شما پیدا نشد. نام را کامل و دقیق بفرستید."
++
++@router.message(MyUsers.lookup, F.text)
++async def my_user_link_lookup(message: Message, state: FSMContext, reseller: Reseller | None) -> None:
++    if reseller is None or reseller.status != ResellerStatus.active: return
++    username = (message.text or "").strip().lower()
++    if not valid_username(username):
++        await message.answer("نام کاربری نامعتبر است. نام اکانت را کامل و دقیق بفرستید (فقط حروف کوچک انگلیسی، عدد و زیرخط)."); return
++    marzban = client()
++    try: info = await marzban.get_user(username)
++    except MarzbanError as exc:
++        if exc.status == 404: await message.answer(ACCOUNT_NOT_FOUND)
++        else:
++            logger.exception("Reseller account lookup failed telegram_id=%s username=%s status=%s", message.from_user.id, username, exc.status)
++            await message.answer("دریافت اطلاعات از پنل ممکن نشد. کمی بعد دوباره تلاش کنید.")
++        return
++    if not user_belongs_to_reseller(info, reseller.display_name):
++        logger.info("Reseller account lookup denied telegram_id=%s reseller=%s username=%s", message.from_user.id, reseller.display_name, username)
++        await message.answer(ACCOUNT_NOT_FOUND); return
++    await send_account_message(message, username=username, data_limit=info.get("data_limit"), subscription_url=marzban.absolute_subscription_url(primary_subscription_url(info)), reply_markup=created_user_actions())
++
+ @router.callback_query(F.data == "res:help")
+ async def help_start(cb: CallbackQuery, reseller: Reseller | None) -> None:
+     if reseller is None: await cb.answer("حساب ریسلری پیدا نشد.", show_alert=True); return
+@@ -320,7 +319,7 @@ async def create_confirm(cb: CallbackQuery, state: FSMContext, reseller: Reselle
+         for admin_id in get_settings().admin_ids: await cb.bot.send_message(admin_id, report)
+     subscription_url = marzban.absolute_subscription_url(primary_subscription_url(created_user))
+     logger.info("Marzban subscription link resolved username=%s found=%s", username, bool(subscription_url))
+-    await state.clear(); await send_create_success_to_reseller(cb, username, subscription_url); await cb.answer()
++    await state.clear(); await send_create_success_to_reseller(cb, username, subscription_url, gb * BYTES_PER_GB, days); await cb.answer()
+ 
+ @router.callback_query(F.data.startswith("res:subscription:"))
+ async def subscription_link_warning(cb: CallbackQuery) -> None:
+diff --git a/app/services/delivery.py b/app/services/delivery.py
+new file mode 100644
+index 0000000..d6c75b4
+--- /dev/null
++++ b/app/services/delivery.py
+@@ -0,0 +1,88 @@
++"""One-message delivery of an account: QR code + name/limit line + copyable subscription link."""
++from __future__ import annotations
++
++import asyncio
++import logging
++from html import escape
++from typing import Any
++
++from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, Message
++
++from app.services.qr import make_subscription_qr_png
++from app.services.reports import RLM
++
++logger = logging.getLogger(__name__)
++BYTES_PER_GB = 1024 ** 3
++CAPTION_LIMIT = 1024  # Telegram photo caption limit (visible characters)
++STATUS_ICON = {"active": "🟢", "on_hold": "🕒", "disabled": "⛔", "expired": "⌛", "limited": "📉"}
++
++
++def limit_text(data_limit: Any, spaced: bool = False) -> str:
++    try:
++        limit = int(data_limit or 0)
++    except (TypeError, ValueError):
++        limit = 0
++    if limit <= 0:
++        return "Unlimited"
++    gb = f"{limit / BYTES_PER_GB:.2f}".rstrip("0").rstrip(".")
++    return f"{gb} GB" if spaced else f"{gb}GB"
++
++
++def days_text(days: int) -> str:
++    return f"{days} Day" if days == 1 else f"{days} Days"
++
++
++def account_line(username: str, data_limit: Any, days: int | None = None) -> str:
++    """Lookup:   testaccount | 35GB
++    Creation: testaccount | 35 GB | 31 Days"""
++    if days is None:
++        return f"{username} | {limit_text(data_limit)}"
++    return f"{username} | {limit_text(data_limit, spaced=True)} | {days_text(days)}"
++
++
++def build_caption(username: str, data_limit: Any, subscription_url: str, days: int | None = None) -> str:
++    return f"{escape(account_line(username, data_limit, days))}\n\n<code>{escape(subscription_url)}</code>"
++
++
++def _qr_png_bytes(url: str, username: str) -> bytes:
++    path = make_subscription_qr_png(url, username)
++    try:
++        return path.read_bytes()
++    finally:
++        path.unlink(missing_ok=True)
++
++
++async def send_account_message(message: Message, *, username: str, data_limit: Any, subscription_url: str | None, days: int | None = None, reply_markup: InlineKeyboardMarkup | None = None) -> None:
++    """Everything in ONE message: QR image, "name | limit [| days]" and the link in monospace (tap to copy)."""
++    line = account_line(username, data_limit, days)
++    if not subscription_url:
++        await message.answer(f"{line}\n\nلینک اشتراک در پاسخ پنل پیدا نشد؛ لطفاً از پنل بررسی کنید.", reply_markup=reply_markup)
++        return
++    caption = build_caption(username, data_limit, subscription_url, days)
++    try:
++        png = await asyncio.to_thread(_qr_png_bytes, subscription_url, username)
++    except Exception:
++        logger.exception("Failed to generate subscription QR username=%s", username)
++        await message.answer(caption, parse_mode="HTML", reply_markup=reply_markup)  # still one message, just without the QR
++        return
++    photo = BufferedInputFile(png, filename=f"{username}_subscription.png")
++    if len(line) + 2 + len(subscription_url) > CAPTION_LIMIT:  # extremely long link: keep the QR, send the link right below
++        await message.answer_photo(photo, caption=escape(line), parse_mode="HTML")
++        await message.answer(f"<code>{escape(subscription_url)}</code>", parse_mode="HTML", reply_markup=reply_markup)
++        return
++    await message.answer_photo(photo, caption=caption, parse_mode="HTML", reply_markup=reply_markup)
++
++
++def accounts_list_text(rows: list[tuple[str, str | None, Any]], page: int, has_next: bool) -> str:
++    """rows: (username, panel status or None, data_limit or None). Names are <code> so a tap copies them."""
++    if not rows:
++        return "هنوز هیچ اکانتی توسط شما ساخته نشده است."
++    lines = [f"{RLM}📋 <b>اکانت‌های من</b>  •  صفحه {page + 1}", "━━━━━━━━━━━━━━", ""]
++    for username, status, limit in rows:
++        icon = STATUS_ICON.get(status or "", "▫️")
++        suffix = f" | {limit_text(limit)}" if limit is not None else ""
++        lines.append(f"{icon} <code>{escape(username)}</code>{suffix}")
++    if has_next:
++        lines += ["", f"{RLM}برای دیدن ادامه لیست روی «نمایش بیشتر» بزنید."]
++    lines += ["", f"{RLM}💡 برای دریافت <b>لینک اشتراک و QR Code</b>، نام اکانت را کامل و دقیق برایم بفرستید.", f"{RLM}(با لمس نام هر اکانت، کپی می‌شود.)"]
++    return "\n".join(lines)
+diff --git a/app/states/reseller.py b/app/states/reseller.py
+index 1c55b4a..59887b2 100644
+--- a/app/states/reseller.py
++++ b/app/states/reseller.py
+@@ -8,3 +8,6 @@ class Recharge(StatesGroup):
+ 
+ class ToggleUserStatus(StatesGroup):
+     username = State(); confirm = State()
++
++class MyUsers(StatesGroup):
++    lookup = State()
+diff --git a/tests/test_account_delivery.py b/tests/test_account_delivery.py
+new file mode 100644
+index 0000000..9bfb4da
+--- /dev/null
++++ b/tests/test_account_delivery.py
+@@ -0,0 +1,180 @@
++import asyncio
++import os
++from types import SimpleNamespace
++from unittest.mock import AsyncMock
++
++os.environ.setdefault("BOT_TOKEN", "123:test")
++os.environ.setdefault("ADMIN_IDS", "1")
++os.environ.setdefault("MARZBAN_BASE_URL", "https://panel.example")
++os.environ.setdefault("MARZBAN_USERNAME", "admin")
++os.environ.setdefault("MARZBAN_PASSWORD", "password")
++
++from aiogram.fsm.context import FSMContext
++from aiogram.fsm.storage.base import StorageKey
++from aiogram.fsm.storage.memory import MemoryStorage
++from aiogram.types import BufferedInputFile
++
++from app.database.models import ResellerStatus
++from app.handlers import admin, admin_search, reseller
++from app.services import delivery
++from app.services.delivery import BYTES_PER_GB, account_line, accounts_list_text, build_caption, limit_text, send_account_message
++from app.services.marzban import MarzbanError, ownership_note
++from app.states.reseller import MyUsers
++
++URL = "https://panel.example/sub/abc123?x=1&y=2"
++
++
++def _msg():
++    return SimpleNamespace(answer=AsyncMock(), answer_photo=AsyncMock(), from_user=SimpleNamespace(id=5))
++
++
++def _state():
++    return FSMContext(storage=MemoryStorage(), key=StorageKey(bot_id=1, chat_id=1, user_id=1))
++
++
++# ----------------------------------------------------------------- formats
++def test_name_limit_formats_match_the_requested_style():
++    assert account_line("testaccount", 35 * BYTES_PER_GB) == "testaccount | 35GB"
++    assert account_line("testaccount", 35 * BYTES_PER_GB, 31) == "testaccount | 35 GB | 31 Days"
++    assert account_line("a", 10 * BYTES_PER_GB, 1) == "a | 10 GB | 1 Day"
++    assert limit_text(int(10.5 * BYTES_PER_GB)) == "10.5GB" and limit_text(0) == "Unlimited" and limit_text(None) == "Unlimited"
++
++
++def test_caption_has_line_then_link_in_monospace_and_escapes_html():
++    caption = build_caption("testaccount", 35 * BYTES_PER_GB, URL)
++
++    assert caption == "testaccount | 35GB\n\n<code>https://panel.example/sub/abc123?x=1&amp;y=2</code>"
++
++
++# ----------------------------------------------------------------- one message
++def test_everything_is_sent_in_one_photo_message():
++    msg = _msg(); markup = object()
++    asyncio.run(send_account_message(msg, username="testaccount", data_limit=35 * BYTES_PER_GB, subscription_url=URL, days=31, reply_markup=markup))
++
++    msg.answer.assert_not_awaited()
++    msg.answer_photo.assert_awaited_once()
++    kwargs = msg.answer_photo.await_args.kwargs
++    assert isinstance(msg.answer_photo.await_args.args[0], BufferedInputFile) and len(msg.answer_photo.await_args.args[0].data) > 500
++    assert kwargs["caption"].startswith("testaccount | 35 GB | 31 Days\n\n<code>https://panel.example/sub/abc123")
++    assert kwargs["parse_mode"] == "HTML" and kwargs["reply_markup"] is markup
++
++
++def test_qr_failure_still_one_message_with_copyable_link(monkeypatch):
++    monkeypatch.setattr(delivery, "_qr_png_bytes", lambda *a: (_ for _ in ()).throw(RuntimeError("no qr")))
++    msg = _msg()
++    asyncio.run(send_account_message(msg, username="u1", data_limit=GB_10, subscription_url=URL))
++
++    msg.answer_photo.assert_not_awaited(); msg.answer.assert_awaited_once()
++    assert msg.answer.await_args.args[0].startswith("u1 | 10GB\n\n<code>") and msg.answer.await_args.kwargs["parse_mode"] == "HTML"
++
++
++def test_missing_link_and_overlong_link_fallbacks():
++    msg = _msg()
++    asyncio.run(send_account_message(msg, username="u1", data_limit=GB_10, subscription_url=None))
++    msg.answer_photo.assert_not_awaited(); assert "u1 | 10GB" in msg.answer.await_args.args[0]
++
++    long_msg = _msg()
++    asyncio.run(send_account_message(long_msg, username="u1", data_limit=GB_10, subscription_url="https://panel.example/sub/" + "a" * 1100))
++    long_msg.answer_photo.assert_awaited_once(); long_msg.answer.assert_awaited_once()  # QR with the name line, then the link right below
++
++
++GB_10 = 10 * BYTES_PER_GB
++
++
++def test_accounts_list_is_compact_and_explains_how_to_get_the_link():
++    text = accounts_list_text([("testaccount", "active", 35 * BYTES_PER_GB), ("user_two", "on_hold", 0), ("old_one", None, None)], 0, True)
++
++    assert "🟢 <code>testaccount</code> | 35GB" in text and "🕒 <code>user_two</code> | Unlimited" in text and "▫️ <code>old_one</code>" in text
++    assert "نام اکانت را کامل و دقیق" in text and "نمایش بیشتر" in text and "→" not in text
++    assert accounts_list_text([], 0, False) == "هنوز هیچ اکانتی توسط شما ساخته نشده است."
++
++
++# ----------------------------------------------------------------- reseller lookup
++class FakeClient:
++    def __init__(self, users): self.users = users
++    def absolute_subscription_url(self, value): return value
++    async def get_user(self, username):
++        if username not in self.users: raise MarzbanError("nf", 404)
++        return self.users[username]
++
++
++def _reseller(status=ResellerStatus.active):
++    return SimpleNamespace(id=1, display_name="plex", status=status)
++
++
++def _lookup(monkeypatch, text, users, reseller_obj=None):
++    monkeypatch.setattr(reseller, "client", lambda: FakeClient(users))
++    msg = _msg(); msg.text = text
++    asyncio.run(reseller.my_user_link_lookup(msg, _state(), reseller_obj or _reseller()))
++    return msg
++
++
++OWN = {"username": "mine", "data_limit": 35 * BYTES_PER_GB, "subscription_url": URL, "note": ownership_note("plex")}
++OTHER = {"username": "theirs", "data_limit": 5 * BYTES_PER_GB, "subscription_url": URL, "note": ownership_note("someone_else")}
++
++
++def test_reseller_gets_link_and_qr_for_own_account_only(monkeypatch):
++    own = _lookup(monkeypatch, "  Mine ", {"mine": OWN, "theirs": OTHER})
++    assert own.answer_photo.await_args.kwargs["caption"].startswith("mine | 35GB\n\n<code>https://panel.example/sub/abc123") and own.answer.await_count == 0
++
++    denied = _lookup(monkeypatch, "theirs", {"mine": OWN, "theirs": OTHER})
++    missing = _lookup(monkeypatch, "nobody", {"mine": OWN})
++    invalid = _lookup(monkeypatch, "not a name!", {"mine": OWN})
++    for m in (denied, missing, invalid): m.answer_photo.assert_not_awaited()
++    assert denied.answer.await_args.args[0] == missing.answer.await_args.args[0] == reseller.ACCOUNT_NOT_FOUND  # same text: no hint that the name exists
++    assert "نامعتبر" in invalid.answer.await_args.args[0]
++
++
++def test_inactive_reseller_gets_nothing(monkeypatch):
++    m = _lookup(monkeypatch, "mine", {"mine": OWN}, _reseller(ResellerStatus.disabled))
++    m.answer.assert_not_awaited(); m.answer_photo.assert_not_awaited()
++
++
++def test_account_list_switches_to_lookup_mode(monkeypatch):
++    async def run(accounts):
++        async def fake_page(cb, reseller_obj, page): return accounts
++        monkeypatch.setattr(reseller, "send_my_users_page", fake_page)
++        state = _state()
++        cb = SimpleNamespace(data="res:users:0", answer=AsyncMock())
++        await reseller.my_users_list(cb, state, _reseller())
++        return await state.get_state()
++
++    assert asyncio.run(run(True)) == MyUsers.lookup.state
++    assert asyncio.run(run(False)) is None  # empty list: nothing to look up
++
++
++def test_creation_success_message_for_reseller_and_admin():
++    cb = SimpleNamespace(message=_msg())
++    asyncio.run(reseller.send_create_success_to_reseller(cb, "testaccount", URL, 35 * BYTES_PER_GB, 31))
++    assert cb.message.answer_photo.await_args.kwargs["caption"].startswith("testaccount | 35 GB | 31 Days\n\n<code>")
++    assert cb.message.answer.await_count == 0
++
++    msg = _msg()
++    asyncio.run(admin._send_admin_create_success(msg, "testaccount", URL, 35 * BYTES_PER_GB, 31))
++    assert msg.answer_photo.await_args.kwargs["caption"].startswith("testaccount | 35 GB | 31 Days\n\n<code>") and msg.answer.await_count == 0
++
++
++# ----------------------------------------------------------------- admin /user QR button
++def test_admin_lookup_has_qr_button_and_it_sends_one_message(monkeypatch):
++    info = {"username": "zahra", "status": "active", "used_traffic": 0, "data_limit": 30 * BYTES_PER_GB, "subscription_url": URL, "expire": None}
++    fake = FakeClient({"zahra": info})
++
++    async def get_user_with_activity(username): return dict(info)
++    fake.get_user_with_activity = get_user_with_activity
++    monkeypatch.setattr(admin_search, "client", lambda: fake)
++    msg = _msg()
++    asyncio.run(admin_search._send_lookup(msg, "zahra"))
++    button = msg.answer.await_args.kwargs["reply_markup"].inline_keyboard[0][0]
++    assert button.text == "📱 QR Code" and button.callback_data == "adm:qr:zahra"
++
++    cb = SimpleNamespace(data="adm:qr:zahra", message=_msg(), answer=AsyncMock())
++    asyncio.run(admin_search.admin_user_qr(cb, True))
++    assert cb.message.answer_photo.await_args.kwargs["caption"].startswith("zahra | 30GB\n\n<code>https://panel.example/sub/abc123") and cb.message.answer.await_count == 0
++
++    denied = SimpleNamespace(data="adm:qr:zahra", message=_msg(), answer=AsyncMock())
++    asyncio.run(admin_search.admin_user_qr(denied, False))
++    denied.message.answer_photo.assert_not_awaited(); assert denied.answer.await_args.kwargs["show_alert"] is True
++
++
++def test_overlong_username_gets_no_button():
++    assert admin_search._qr_keyboard("a" * 60) is None and admin_search._qr_keyboard("a" * 40) is not None

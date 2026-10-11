@@ -8,3 +8,6 @@ class Recharge(StatesGroup):
 
 class ToggleUserStatus(StatesGroup):
     username = State(); confirm = State()
+
+class MyUsers(StatesGroup):
+    lookup = State()

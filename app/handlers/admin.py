@@ -15,7 +15,7 @@ from app.database.models import RechargeStatus, ResellerStatus, TransactionType
 from app.database.repositories import CreatedUserRepository, InboundRepository, RechargeRepository, ResellerRepository, SettingsRepository, TransactionRepository
 from app.database.session import SessionLocal
 from app.keyboards.admin import group_access_keyboard, reseller_card_keyboard, reseller_delete_keyboard, reseller_hard_delete_keyboard, reseller_list_keyboard, report_period_keyboard, report_scope_keyboard, admin_back_cancel, backup_keyboard, balance_action_keyboard, confirm_keyboard, destructive_confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_reject_keyboard, renewal_settings_keyboard, resellers_keyboard, resellers_menu, status_keyboard, reseller_bulk_actions_keyboard, reseller_bulk_confirm_keyboard, reseller_user_actions_keyboard, reseller_users_page_keyboard, telegram_account_keyboard, telegram_accounts_actions, tx_filter_keyboard, tx_page_keyboard
-from app.services.qr import make_subscription_qr_png
+from app.services.delivery import send_account_message
 from app.services.datetime import jalali_datetime_text, jalali_filename_datetime
 from app.services.bulk_users import build_plan, execute_plan, fetch_plan
 from app.services.reseller_view import PAGE_SIZE as RESELLER_PAGE_SIZE, ResellerRow, delete_choice_text, group_access_text, group_summary, hard_delete_confirm_text, reseller_card_text, reseller_list_text
@@ -67,27 +67,8 @@ def _primary_subscription_url(user: dict | None) -> str | None:
     return None
 
 
-async def _send_admin_create_success(message: Message, username: str, subscription_url: str | None) -> None:
-    if not subscription_url:
-        await message.answer(
-            f"✅ کاربر با موفقیت ساخته شد.\n\n👤 نام کاربری:\n{username}\n\nلینک اشتراک در پاسخ پنل پیدا نشد؛ لطفاً از پنل بررسی کنید.",
-            reply_markup=panel(),
-        )
-        return
-    await message.answer(
-        f"✅ کاربر با موفقیت ساخته شد.\n\n👤 نام کاربری:\n{username}\n\n🔗 لینک اشتراک:\n{subscription_url}",
-        reply_markup=panel(),
-    )
-    qr_path = None
-    try:
-        qr_path = make_subscription_qr_png(subscription_url, username)
-        await message.answer_photo(FSInputFile(qr_path, filename=f"{username}_subscription.png"), caption="📱 QR Code\nکد را با کلاینت VPN اسکن کنید.")
-    except Exception:
-        logger.exception("Failed to generate/send admin subscription QR username=%s", username)
-        await message.answer("لینک اشتراک ارسال شد، اما ساخت QR Code ناموفق بود.")
-    finally:
-        if qr_path is not None:
-            qr_path.unlink(missing_ok=True)
+async def _send_admin_create_success(message: Message, username: str, subscription_url: str | None, data_limit: int, days: int) -> None:
+    await send_account_message(message, username=username, data_limit=data_limit, subscription_url=subscription_url, days=days, reply_markup=panel())
 
 
 def _admin_user_info_text(info: dict) -> str:
@@ -306,7 +287,7 @@ async def admin_create_marzban_confirm(cb: CallbackQuery, state: FSMContext, is_
         logger.exception("Admin Marzban create failed username=%s payload_summary=%s", username, create_payload_summary(payload))
         await cb.message.answer("ساخت کاربر در پنل ناموفق بود. جزئیات امن خطا در لاگ ثبت شد.", reply_markup=panel()); await state.clear(); await cb.answer(); return
     subscription_url = marzban.absolute_subscription_url(_primary_subscription_url(created_user))
-    await state.clear(); await _send_admin_create_success(cb.message, username, subscription_url); await cb.answer()
+    await state.clear(); await _send_admin_create_success(cb.message, username, subscription_url, gb * BYTES_PER_GB, days); await cb.answer()
 
 
 @router.callback_query(F.data == "adm:mb:renew")

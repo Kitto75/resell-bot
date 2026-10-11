@@ -14,11 +14,11 @@ from app.keyboards.reseller import created_user_actions, dashboard, my_users_pag
 from app.services.billing import BYTES_PER_GB, BillingService
 from app.services.marzban import MarzbanClient, MarzbanError, create_payload_summary, extract_last_user_agent, on_hold_expire_duration, ownership_note, user_belongs_to_reseller
 from app.services.renewal import RenewalMode, calculate_renewal, renewal_mode_confirmation_text
-from app.services.qr import make_subscription_qr_png
+from app.services.delivery import accounts_list_text, send_account_message
 from app.services.reports import operation_report, recharge_request_text
 from app.services.user_info import reseller_activity_lines
 from app.services.validators import valid_username
-from app.states.reseller import CreateUser, Recharge, RenewUser, ToggleUserStatus
+from app.states.reseller import CreateUser, MyUsers, Recharge, RenewUser, ToggleUserStatus
 from app.utils.formatting import format_bytes_to_gb, format_remaining_time, format_toman, status_fa
 
 router = Router()
@@ -49,18 +49,7 @@ async def fetch_marzban_user(marzban: MarzbanClient, username: str) -> dict | No
 
 
 
-def _my_users_text(usernames: list[str], page: int, has_next: bool) -> str:
-    if not usernames:
-        return "هنوز هیچ اکانتی توسط شما ساخته نشده است."
-    start = page * MY_USERS_PAGE_SIZE
-    lines = ["📋 اکانت‌های ساخته‌شده شما", ""]
-    lines.extend(f"{start + idx}. {username}" for idx, username in enumerate(usernames, 1))
-    if has_next:
-        lines.extend(["", "برای دیدن ادامه لیست، روی «نمایش بیشتر» بزنید."])
-    return "\n".join(lines)
-
-
-async def send_my_users_page(cb: CallbackQuery, reseller: Reseller, page: int) -> None:
+async def send_my_users_page(cb: CallbackQuery, reseller: Reseller, page: int) -> bool:
     async with SessionLocal() as session:
         users = await CreatedUserRepository(session).list_by_reseller(
             reseller.id,
@@ -68,9 +57,16 @@ async def send_my_users_page(cb: CallbackQuery, reseller: Reseller, page: int) -
             offset=page * MY_USERS_PAGE_SIZE,
         )
     has_next = len(users) > MY_USERS_PAGE_SIZE
-    page_users = users[:MY_USERS_PAGE_SIZE]
-    usernames = [user.username for user in page_users]
-    await cb.message.answer(_my_users_text(usernames, page, has_next), reply_markup=my_users_pagination(page, has_next))
+    usernames = [user.username for user in users[:MY_USERS_PAGE_SIZE]]
+    details: dict[str, dict] = {}
+    if usernames:
+        try:  # one request for the whole page: status + volume next to every name
+            details = {str(u.get("username")): u for u in await client().list_users_by_usernames(usernames)}
+        except MarzbanError:
+            logger.exception("Could not read account details for the reseller list reseller_id=%s", reseller.id)
+    rows = [(name, str(getattr(details[name].get("status"), "value", details[name].get("status"))) if name in details else None, details[name].get("data_limit") if name in details else None) for name in usernames]
+    await cb.message.answer(accounts_list_text(rows, page, has_next), reply_markup=my_users_pagination(page, has_next), parse_mode="HTML")
+    return bool(usernames)
 
 def primary_subscription_url(user: dict | None) -> str | None:
     if not isinstance(user, dict):
@@ -91,27 +87,8 @@ def primary_subscription_url(user: dict | None) -> str | None:
     return None
 
 
-async def send_create_success_to_reseller(cb: CallbackQuery, username: str, subscription_url: str | None) -> None:
-    if not subscription_url:
-        await cb.message.answer(
-            f"✅ اکانت با موفقیت ساخته شد.\n\n👤 نام کاربری:\n{username}\n\nلینک اشتراک در پاسخ پنل پیدا نشد؛ لطفاً از پنل بررسی کنید.",
-            reply_markup=created_user_actions(),
-        )
-        return
-    await cb.message.answer(
-        f"✅ اکانت با موفقیت ساخته شد.\n\n👤 نام کاربری:\n{username}\n\n🔗 لینک اشتراک:\n{subscription_url}",
-        reply_markup=created_user_actions(),
-    )
-    qr_path = None
-    try:
-        qr_path = make_subscription_qr_png(subscription_url, username)
-        await cb.message.answer_photo(FSInputFile(qr_path, filename=f"{username}_subscription.png"), caption="📱 QR Code\nکد را با کلاینت VPN اسکن کنید.")
-    except Exception:
-        logger.exception("Failed to generate/send subscription QR username=%s", username)
-        await cb.message.answer("لینک اشتراک ارسال شد، اما ساخت QR Code ناموفق بود.")
-    finally:
-        if qr_path is not None:
-            qr_path.unlink(missing_ok=True)
+async def send_create_success_to_reseller(cb: CallbackQuery, username: str, subscription_url: str | None, data_limit: int, days: int) -> None:
+    await send_account_message(cb.message, username=username, data_limit=data_limit, subscription_url=subscription_url, days=days, reply_markup=created_user_actions())
 
 def _user_is_online(user: dict) -> bool:
     for key in ("online", "is_online"):
@@ -249,8 +226,30 @@ async def my_users_list(cb: CallbackQuery, state: FSMContext, reseller: Reseller
         await cb.answer("درخواست نامعتبر است.", show_alert=True); return
     if page < 0:
         await cb.answer("درخواست نامعتبر است.", show_alert=True); return
-    await send_my_users_page(cb, reseller, page)
+    has_accounts = await send_my_users_page(cb, reseller, page)
+    if has_accounts: await state.set_state(MyUsers.lookup)  # next text message = exact username to fetch link + QR
     await cb.answer()
+
+ACCOUNT_NOT_FOUND = "اکانتی با این نام در لیست اکانت‌های شما پیدا نشد. نام را کامل و دقیق بفرستید."
+
+@router.message(MyUsers.lookup, F.text)
+async def my_user_link_lookup(message: Message, state: FSMContext, reseller: Reseller | None) -> None:
+    if reseller is None or reseller.status != ResellerStatus.active: return
+    username = (message.text or "").strip().lower()
+    if not valid_username(username):
+        await message.answer("نام کاربری نامعتبر است. نام اکانت را کامل و دقیق بفرستید (فقط حروف کوچک انگلیسی، عدد و زیرخط)."); return
+    marzban = client()
+    try: info = await marzban.get_user(username)
+    except MarzbanError as exc:
+        if exc.status == 404: await message.answer(ACCOUNT_NOT_FOUND)
+        else:
+            logger.exception("Reseller account lookup failed telegram_id=%s username=%s status=%s", message.from_user.id, username, exc.status)
+            await message.answer("دریافت اطلاعات از پنل ممکن نشد. کمی بعد دوباره تلاش کنید.")
+        return
+    if not user_belongs_to_reseller(info, reseller.display_name):
+        logger.info("Reseller account lookup denied telegram_id=%s reseller=%s username=%s", message.from_user.id, reseller.display_name, username)
+        await message.answer(ACCOUNT_NOT_FOUND); return
+    await send_account_message(message, username=username, data_limit=info.get("data_limit"), subscription_url=marzban.absolute_subscription_url(primary_subscription_url(info)), reply_markup=created_user_actions())
 
 @router.callback_query(F.data == "res:help")
 async def help_start(cb: CallbackQuery, reseller: Reseller | None) -> None:
@@ -320,7 +319,7 @@ async def create_confirm(cb: CallbackQuery, state: FSMContext, reseller: Reselle
         for admin_id in get_settings().admin_ids: await cb.bot.send_message(admin_id, report)
     subscription_url = marzban.absolute_subscription_url(primary_subscription_url(created_user))
     logger.info("Marzban subscription link resolved username=%s found=%s", username, bool(subscription_url))
-    await state.clear(); await send_create_success_to_reseller(cb, username, subscription_url); await cb.answer()
+    await state.clear(); await send_create_success_to_reseller(cb, username, subscription_url, gb * BYTES_PER_GB, days); await cb.answer()
 
 @router.callback_query(F.data.startswith("res:subscription:"))
 async def subscription_link_warning(cb: CallbackQuery) -> None:
