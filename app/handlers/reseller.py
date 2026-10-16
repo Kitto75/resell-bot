@@ -12,6 +12,7 @@ from app.keyboards.admin import recharge_actions
 from app.keyboards.common import back_cancel, reseller_confirm
 from app.keyboards.reseller import created_user_actions, dashboard, my_users_pagination
 from app.services.billing import BYTES_PER_GB, BillingService
+from app.services.limits import effective_limits
 from app.services.marzban import MarzbanClient, MarzbanError, create_payload_summary, extract_last_user_agent, on_hold_expire_duration, ownership_note, user_belongs_to_reseller
 from app.services.renewal import RenewalMode, calculate_renewal, renewal_mode_confirmation_text
 from app.services.delivery import accounts_list_text, send_account_message
@@ -30,6 +31,11 @@ USERNAME_EXISTS_NOT_YOURS = "این نام کاربری از قبل وجود د�
 MARZBAN_CREATE_FAILED = "ساخت اکانت در پنل ناموفق بود. لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید."
 POST_CREATE_VERIFY_DELAY_SECONDS = 3
 MY_USERS_PAGE_SIZE = 10
+
+async def reseller_limits(reseller_id: int):
+    async with SessionLocal() as session:
+        return await effective_limits(session, reseller_id)
+
 
 def client() -> MarzbanClient:
     s = get_settings(); return MarzbanClient(s.marzban_base_url, s.marzban_username, s.marzban_password)
@@ -266,30 +272,36 @@ async def create_start(cb: CallbackQuery, state: FSMContext, reseller: Reseller 
     await state.set_state(CreateUser.username); await cb.message.answer("نام کاربری را وارد کنید:", reply_markup=back_cancel()); await cb.answer()
 
 @router.message(CreateUser.username)
-async def create_username(message: Message, state: FSMContext) -> None:
+async def create_username(message: Message, state: FSMContext, reseller: Reseller) -> None:
     username = (message.text or "").strip()
     if not valid_username(username): await message.answer("نام کاربری نامعتبر است. فقط حروف کوچک انگلیسی، عدد و زیرخط مجاز است."); return
-    await state.update_data(username=username); await state.set_state(CreateUser.gb); await message.answer("حجم را به گیگابایت وارد کنید:", reply_markup=back_cancel())
+    await state.update_data(username=username); await state.set_state(CreateUser.gb); await message.answer(f"حجم را به گیگابایت وارد کنید{(await reseller_limits(reseller.id)).gb_hint()}:", reply_markup=back_cancel())
 
 @router.message(CreateUser.gb)
 async def create_gb(message: Message, state: FSMContext, reseller: Reseller) -> None:
     try: gb = int(message.text or "")
     except ValueError: await message.answer("یک عدد صحیح معتبر وارد کنید."); return
     if gb <= 0: await message.answer("حجم باید بیشتر از صفر باشد."); return
+    limits = await reseller_limits(reseller.id)
+    if (error := limits.check_gb(gb)): await message.answer(error); return
     cost = Decimal(gb) * reseller.price_per_gb
-    await state.update_data(gb=gb, cost=str(cost)); await state.set_state(CreateUser.days); await message.answer("مدت اعتبار را به روز وارد کنید:", reply_markup=back_cancel())
+    await state.update_data(gb=gb, cost=str(cost)); await state.set_state(CreateUser.days); await message.answer(f"مدت اعتبار را به روز وارد کنید{limits.days_hint()}:", reply_markup=back_cancel())
 
 @router.message(CreateUser.days)
-async def create_days(message: Message, state: FSMContext) -> None:
+async def create_days(message: Message, state: FSMContext, reseller: Reseller) -> None:
     try: days = int(message.text or "")
     except ValueError: await message.answer("یک عدد صحیح معتبر وارد کنید."); return
     if days <= 0: await message.answer("مدت اعتبار باید بیشتر از صفر باشد."); return
+    if (error := (await reseller_limits(reseller.id)).check_days(days)): await message.answer(error); return
     data = await state.update_data(days=days); await state.set_state(CreateUser.confirm)
     await message.answer(f"خلاصه ساخت اکانت\nنام کاربری: {data['username']}\nحجم: {data['gb']} گیگابایت\nمدت اعتبار پس از فعال‌سازی: {days} روز\nوضعیت اولیه: در انتظار اتصال\nهزینه: {format_toman(data['cost'])}\nآیا تایید می‌کنید؟", reply_markup=reseller_confirm("res:create:confirm", "res:create"))
 
 @router.callback_query(CreateUser.confirm, F.data == "res:create:confirm")
 async def create_confirm(cb: CallbackQuery, state: FSMContext, reseller: Reseller) -> None:
     data = await state.get_data(); username = data["username"]; gb = int(data["gb"]); days = int(data["days"])
+    limits = await reseller_limits(reseller.id)
+    if (error := limits.check_gb(gb) or limits.check_days(days)):
+        await cb.message.answer(f"محدودیت‌های تعیین‌شده توسط مدیر تغییر کرده است.\n{error}\nلطفاً دوباره از ابتدا شروع کنید."); await state.clear(); await cb.answer(); return
     report = None
     async with SessionLocal() as session:
         async with session.begin():
@@ -398,21 +410,24 @@ async def renew_username(message: Message, state: FSMContext, reseller: Reseller
     await message.answer(f"اطلاعات اکانت\nنام کاربری: {username}\nحجم کل: {format_bytes_to_gb(info.get('data_limit'))}\nمصرف‌شده: {format_bytes_to_gb(info.get('used_traffic'))}\nباقی‌مانده: {format_bytes_to_gb(max(0, int(info.get('data_limit') or 0)-int(info.get('used_traffic') or 0)))}\nزمان باقی‌مانده: {format_remaining_time(info.get('expire'), info.get('remaining_seconds'), info.get('remaining_days'))}\nوضعیت: {status_fa(info.get('status'))}\nآخرین برنامه / User-Agent: {extract_last_user_agent(info)}\n{reseller_activity_lines(info)}", reply_markup=reseller_confirm("res:renew:user_confirm", "res:renew", "✅ تایید تمدید"))
 
 @router.callback_query(RenewUser.confirm_user, F.data == "res:renew:user_confirm")
-async def renew_confirm_user(cb: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(RenewUser.gb); await cb.message.answer("حجم اضافه را به گیگابایت وارد کنید:", reply_markup=back_cancel()); await cb.answer()
+async def renew_confirm_user(cb: CallbackQuery, state: FSMContext, reseller: Reseller) -> None:
+    await state.set_state(RenewUser.gb); await cb.message.answer(f"حجم اضافه را به گیگابایت وارد کنید{(await reseller_limits(reseller.id)).gb_hint()}:", reply_markup=back_cancel()); await cb.answer()
 
 @router.message(RenewUser.gb)
-async def renew_gb(message: Message, state: FSMContext) -> None:
+async def renew_gb(message: Message, state: FSMContext, reseller: Reseller) -> None:
     try: gb = int(message.text or "")
     except ValueError: await message.answer("یک عدد معتبر وارد کنید."); return
     if gb <= 0: await message.answer("حجم باید بیشتر از صفر باشد."); return
-    await state.update_data(gb=gb); await state.set_state(RenewUser.days); await message.answer("روزهای اضافه را وارد کنید:", reply_markup=back_cancel())
+    limits = await reseller_limits(reseller.id)
+    if (error := limits.check_gb(gb)): await message.answer(error); return
+    await state.update_data(gb=gb); await state.set_state(RenewUser.days); await message.answer(f"روزهای اضافه را وارد کنید{limits.days_hint()}:", reply_markup=back_cancel())
 
 @router.message(RenewUser.days)
 async def renew_days(message: Message, state: FSMContext, reseller: Reseller) -> None:
     try: days = int(message.text or "")
     except ValueError: await message.answer("یک عدد معتبر وارد کنید."); return
     if days <= 0: await message.answer("روز باید بیشتر از صفر باشد."); return
+    if (error := (await reseller_limits(reseller.id)).check_days(days)): await message.answer(error); return
     data = await state.update_data(days=days); cost = Decimal(data["gb"]) * reseller.price_per_gb
     async with SessionLocal() as session:
         mode = await SettingsRepository(session).get_renewal_mode()
@@ -421,6 +436,9 @@ async def renew_days(message: Message, state: FSMContext, reseller: Reseller) ->
 @router.callback_query(RenewUser.confirm, F.data == "res:renew:confirm")
 async def renew_confirm(cb: CallbackQuery, state: FSMContext, reseller: Reseller) -> None:
     data = await state.get_data(); username = data["username"]; gb = int(data["gb"]); days = int(data["days"])
+    limits = await reseller_limits(reseller.id)
+    if (error := limits.check_gb(gb) or limits.check_days(days)):
+        await cb.message.answer(f"محدودیت‌های تعیین‌شده توسط مدیر تغییر کرده است.\n{error}\nلطفاً دوباره از ابتدا شروع کنید."); await state.clear(); await cb.answer(); return
     async with SessionLocal() as session, session.begin():
         db_reseller = await session.get(type(reseller), reseller.id); cost = BillingService(session).calculate_cost(gb, db_reseller.price_per_gb)
         if db_reseller.balance < cost: await cb.message.answer("موجودی کافی نیست."); await state.clear(); await cb.answer(); return

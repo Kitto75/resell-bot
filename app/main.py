@@ -3,8 +3,9 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.config import get_settings
-from app.handlers import admin, admin_search, common, reseller
+from app.handlers import admin, admin_ext, admin_search, common, reseller
 from app.middlewares.auth import AuthMiddleware
+from app.middlewares.disabled import DisabledResellerMiddleware
 from app.middlewares.maintenance import MaintenanceMiddleware
 from app.services.scheduler import restore_backup_job, set_scheduler
 from app.utils.logger import setup_logging
@@ -14,12 +15,15 @@ async def main() -> None:
     bot = Bot(settings.bot_token); dp = Dispatcher(storage=MemoryStorage())
     scheduler = AsyncIOScheduler(timezone=settings.timezone); set_scheduler(scheduler)
     auth_middleware = AuthMiddleware()
+    disabled_middleware = DisabledResellerMiddleware()
     maintenance_middleware = MaintenanceMiddleware()
     dp.message.middleware(auth_middleware)
     dp.callback_query.middleware(auth_middleware)
+    dp.message.middleware(disabled_middleware)
+    dp.callback_query.middleware(disabled_middleware)
     dp.message.middleware(maintenance_middleware)
     dp.callback_query.middleware(maintenance_middleware)
-    dp.include_router(common.router); dp.include_router(admin.router); dp.include_router(reseller.router); dp.include_router(admin_search.router)
+    dp.include_router(common.router); dp.include_router(admin_ext.router); dp.include_router(admin.router); dp.include_router(reseller.router); dp.include_router(admin_search.router)
     await restore_backup_job(scheduler, bot); scheduler.start()
     try:
         await dp.start_polling(bot)

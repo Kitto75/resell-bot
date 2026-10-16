@@ -61,6 +61,7 @@ class ResellerRepository:
         if await self.session.get(Reseller, reseller_id) is None: return False
         for model in (BalanceTransaction, RechargeRequest, ResellerInbound, CreatedUser, OperationLog, ResellerTelegramAccount):
             await self.session.execute(delete(model).where(model.reseller_id == reseller_id))
+        await self.session.execute(delete(BotSetting).where(BotSetting.key.in_([f"limits:r:{reseller_id}", f"rmsg:{reseller_id}"])))
         await self.session.execute(delete(Reseller).where(Reseller.id == reseller_id))
         self.session.expire_all(); return True
 

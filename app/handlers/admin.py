@@ -11,7 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, FSInputFile, Message
 from sqlalchemy.exc import IntegrityError
 from app.config import get_settings
-from app.database.models import RechargeStatus, ResellerStatus, TransactionType
+from app.database.models import RechargeStatus, ResellerStatus, ResellerTelegramAccount, TransactionType
 from app.database.repositories import CreatedUserRepository, InboundRepository, RechargeRepository, ResellerRepository, SettingsRepository, TransactionRepository
 from app.database.session import SessionLocal
 from app.keyboards.admin import group_access_keyboard, subscription_settings_keyboard, reseller_card_keyboard, reseller_delete_keyboard, reseller_hard_delete_keyboard, reseller_list_keyboard, report_period_keyboard, report_scope_keyboard, admin_back_cancel, backup_keyboard, balance_action_keyboard, confirm_keyboard, destructive_confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_reject_keyboard, renewal_settings_keyboard, resellers_keyboard, resellers_menu, status_keyboard, reseller_bulk_actions_keyboard, reseller_bulk_confirm_keyboard, reseller_user_actions_keyboard, reseller_users_page_keyboard, telegram_account_keyboard, telegram_accounts_actions, tx_filter_keyboard, tx_page_keyboard
@@ -21,6 +21,9 @@ from app.services.bulk_users import build_plan, execute_plan, fetch_plan
 from app.services.reseller_view import PAGE_SIZE as RESELLER_PAGE_SIZE, ResellerRow, delete_choice_text, group_access_text, group_summary, hard_delete_confirm_text, reseller_card_text, reseller_list_text
 from app.services.pdf_report import PdfFontError, PERIOD_LABELS, build_report_pdf, collect_report_data
 from app.services.reports import transactions_page_text
+from app.services.limits import effective_detail, message_key, summary_text
+from app.services.tg_resolve import resolve_input
+from app.states.admin import ReportScope
 from app.services.validators import valid_username
 from app.services.backup import get_backup_status, send_database_backup, set_backup_enabled, set_backup_interval, sqlite_backup_supported
 from app.services.billing import BYTES_PER_GB, BillingService
@@ -675,7 +678,7 @@ async def cancel(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
 async def add_reseller_cmd(message: Message, state: FSMContext, is_admin: bool) -> None:
     if not is_admin: return
     await state.clear(); await state.set_state(AddReseller.telegram_id)
-    await message.answer("شناسه عددی تلگرام ریسلر را وارد کنید.", reply_markup=admin_back_cancel())
+    await message.answer("➕ افزودن ریسلر\nآیدی عددی یا یوزرنیم تلگرام ریسلر را وارد کنید (مثل 123456789 یا @username).", reply_markup=admin_back_cancel())
 
 @router.callback_query(F.data == "adm:resellers")
 async def resellers_menu_cb(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
@@ -686,13 +689,13 @@ async def resellers_menu_cb(cb: CallbackQuery, state: FSMContext, is_admin: bool
 async def add_reseller_start(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
     if not is_admin: await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
     await state.clear(); await state.set_state(AddReseller.telegram_id)
-    await cb.message.answer("افزودن ریسلر\nشناسه عددی تلگرام ریسلر را وارد کنید.", reply_markup=admin_back_cancel()); await cb.answer()
+    await cb.message.answer("➕ افزودن ریسلر\nآیدی عددی یا یوزرنیم تلگرام ریسلر را وارد کنید (مثل 123456789 یا @username).", reply_markup=admin_back_cancel()); await cb.answer()
 
 @router.message(AddReseller.telegram_id)
 async def add_tid(message: Message, state: FSMContext) -> None:
-    try: telegram_id = int((message.text or '').strip())
-    except ValueError: await message.answer("شناسه تلگرام باید عدد صحیح باشد. دوباره وارد کنید."); return
-    await state.update_data(telegram_id=telegram_id); await state.set_state(AddReseller.balance)
+    telegram_id, username, error = await resolve_input(message.bot, message.text)
+    if error: await message.answer(error); return
+    await state.update_data(telegram_id=telegram_id, tg_username=username); await state.set_state(AddReseller.balance)
     await message.answer("موجودی اولیه را به تومان وارد کنید.", reply_markup=admin_back_cancel("adm:add_reseller"))
 
 @router.message(AddReseller.balance)
@@ -714,7 +717,7 @@ async def add_name(message: Message, state: FSMContext) -> None:
     name = (message.text or '').strip()
     if len(name) < 2: await message.answer("نام نمایشی باید حداقل ۲ کاراکتر باشد."); return
     data = await state.update_data(display_name=name); await state.set_state(AddReseller.confirm)
-    await message.answer(f"تایید ریسلر جدید:\n\nشناسه تلگرام: {data['telegram_id']}\nموجودی اولیه: {format_toman(data['balance'])}\nقیمت هر گیگابایت: {format_toman(data['price'])}\nنام نمایشی: {data['display_name']}", reply_markup=confirm_keyboard("adm:add:confirm", "adm:add_reseller"))
+    await message.answer(f"تایید ریسلر جدید:\n\nشناسه تلگرام: {data['telegram_id']}{' (@' + data['tg_username'] + ')' if data.get('tg_username') else ''}\nموجودی اولیه: {format_toman(data['balance'])}\nقیمت هر گیگابایت: {format_toman(data['price'])}\nنام نمایشی: {data['display_name']}", reply_markup=confirm_keyboard("adm:add:confirm", "adm:add_reseller"))
 
 @router.callback_query(AddReseller.confirm, F.data == "adm:add:confirm")
 async def add_confirm(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
@@ -722,10 +725,11 @@ async def add_confirm(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> N
     data = await state.get_data()
     try:
         async with SessionLocal() as session, session.begin():
-            await ResellerRepository(session).add(int(data['telegram_id']), data['display_name'], Decimal(data['balance']), Decimal(data['price']))
+            created = await ResellerRepository(session).add(int(data['telegram_id']), data['display_name'], Decimal(data['balance']), Decimal(data['price']))
+            created_id = created.id
     except IntegrityError:
         await cb.message.answer("ریسلری با این شناسه تلگرام وجود دارد. تغییری ذخیره نشد.", reply_markup=panel()); await state.clear(); await cb.answer(); return
-    await state.clear(); await cb.message.answer("✅ ریسلر ساخته شد.", reply_markup=panel()); await cb.answer()
+    await state.clear(); await answer_card(cb.message, created_id, "✅ ریسلر ساخته شد."); await cb.answer()
 
 
 
@@ -738,10 +742,11 @@ async def _reseller_row(session, reseller) -> ResellerRow:
         groups=sorted(await InboundRepository(session).allowed_tags(reseller.id)),
         telegram_ids=[a.telegram_id for a in accounts] or [reseller.telegram_id],
         created_text=jalali_datetime_text(reseller.created_at, get_settings().timezone)[:10] if reseller.created_at else "",
+        limits_text=summary_text(await effective_detail(session, reseller.id)),
     )
 
 
-async def _show_reseller_list(cb: CallbackQuery, view: str, page: int) -> None:
+async def build_reseller_list(view: str, page: int):
     archived_view = view == "r"
     async with SessionLocal() as session:
         everyone = await ResellerRepository(session).list(include_archived=True)
@@ -749,16 +754,36 @@ async def _show_reseller_list(cb: CallbackQuery, view: str, page: int) -> None:
         current = archived if archived_view else [r for r in everyone if r.status != ResellerStatus.archived]
         page = max(0, min(page, (max(len(current), 1) - 1) // RESELLER_PAGE_SIZE))
         rows = [await _reseller_row(session, r) for r in current[page * RESELLER_PAGE_SIZE:(page + 1) * RESELLER_PAGE_SIZE]]
-    await edit_or_answer(cb, reseller_list_text(rows, page, len(current), archived_view), reseller_list_keyboard(rows, page, len(current), archived_view, len(archived)))
+    return reseller_list_text(rows, page, len(current), archived_view), reseller_list_keyboard(rows, page, len(current), archived_view, len(archived))
+
+
+async def build_reseller_card(reseller_id: int):
+    async with SessionLocal() as session:
+        reseller = await ResellerRepository(session).get(reseller_id)
+        if reseller is None: return None
+        row = await _reseller_row(session, reseller)
+    return reseller_card_text(row), reseller_card_keyboard(row.id, row.status, "r" if row.status == "archived" else "a")
+
+
+async def answer_card(message: Message, reseller_id: int, note: str | None = None) -> None:
+    """Finish an operation by showing the reseller card again (instead of dumping the admin on the main panel)."""
+    built = await build_reseller_card(reseller_id)
+    if built is None:
+        await message.answer(note or "ریسلر پیدا نشد یا حذف شده است.", reply_markup=panel()); return
+    text, markup = built
+    await message.answer(f"{note}\n\n{text}" if note else text, reply_markup=markup)
+
+
+async def _show_reseller_list(cb: CallbackQuery, view: str, page: int) -> None:
+    text, markup = await build_reseller_list(view, page)
+    await edit_or_answer(cb, text, markup)
 
 
 async def _show_reseller_card(cb: CallbackQuery, reseller_id: int) -> None:
-    async with SessionLocal() as session:
-        reseller = await ResellerRepository(session).get(reseller_id)
-        if reseller is None:
-            await cb.answer("ریسلر پیدا نشد یا حذف شده است.", show_alert=True); return
-        row = await _reseller_row(session, reseller)
-    await edit_or_answer(cb, reseller_card_text(row), reseller_card_keyboard(row.id, row.status, "r" if row.status == "archived" else "a"))
+    built = await build_reseller_card(reseller_id)
+    if built is None:
+        await cb.answer("ریسلر پیدا نشد یا حذف شده است.", show_alert=True); return
+    await edit_or_answer(cb, *built)
 
 
 @router.callback_query(F.data == "adm:reseller_list")
@@ -780,7 +805,7 @@ async def reseller_card_cb(cb: CallbackQuery, state: FSMContext, is_admin: bool)
     await state.clear(); await _show_reseller_card(cb, int(cb.data.rsplit(":", 1)[1])); await cb.answer()
 
 
-@router.callback_query(F.data.regexp(r"^adm:rc:st:\d+:(active|disabled)$"))
+@router.callback_query(F.data.regexp(r"^adm:rc:st:\d+:active$"))
 async def reseller_quick_status(cb: CallbackQuery, is_admin: bool) -> None:
     if not is_admin: return
     _, _, _, rid, status = cb.data.split(":")
@@ -789,6 +814,7 @@ async def reseller_quick_status(cb: CallbackQuery, is_admin: bool) -> None:
         if reseller is None:
             await cb.answer("ریسلر پیدا نشد.", show_alert=True); return
         reseller.status = ResellerStatus(status)
+        await SettingsRepository(session).set(message_key(int(rid)), "")  # re-enabled: the old "you are disabled" message is obsolete
     logger.info("Admin changed reseller status admin_id=%s reseller_id=%s status=%s", cb.from_user.id, rid, status)
     await _show_reseller_card(cb, int(rid)); await cb.answer("✅ وضعیت ریسلر تغییر کرد.")
 
@@ -851,7 +877,7 @@ async def edit_field(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> No
     if not is_admin: return
     _, _, rid, field = cb.data.split(":"); await state.update_data(reseller_id=int(rid), field=field); await state.set_state(EditReseller.value)
     if field == "status":
-        await cb.message.answer("وضعیت جدید را انتخاب کنید.", reply_markup=status_keyboard())
+        await cb.message.answer("وضعیت جدید را انتخاب کنید.", reply_markup=status_keyboard(int(rid)))
     else:
         await cb.message.answer(f"مقدار جدید {'نام نمایشی' if field == 'display_name' else 'قیمت هر گیگابایت'} را وارد کنید.", reply_markup=admin_back_cancel(f"adm:editsel:{rid}"))
     await cb.answer()
@@ -882,8 +908,10 @@ async def edit_confirm(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> 
         if reseller is None: await cb.answer("ریسلر پیدا نشد", show_alert=True); return
         if data['field'] == 'display_name': reseller.display_name = data['value']
         elif data['field'] == 'price_per_gb': reseller.price_per_gb = Decimal(data['value'])
-        elif data['field'] == 'status': reseller.status = ResellerStatus(data['value'])
-    await state.clear(); await cb.message.answer("✅ ریسلر به‌روزرسانی شد.", reply_markup=panel()); await cb.answer()
+        elif data['field'] == 'status':
+            reseller.status = ResellerStatus(data['value'])
+            if data['value'] == 'active': await SettingsRepository(session).set(message_key(reseller.id), "")
+    await state.clear(); await answer_card(cb.message, int(data['reseller_id']), "✅ ریسلر به‌روزرسانی شد."); await cb.answer()
 
 
 @router.callback_query(F.data == "adm:tg_accounts")
@@ -905,19 +933,19 @@ async def telegram_accounts_menu(cb: CallbackQuery, state: FSMContext, is_admin:
 async def telegram_account_add_start(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
     if not is_admin: return
     reseller_id = int(cb.data.rsplit(":", 1)[1]); await state.update_data(reseller_id=reseller_id); await state.set_state(TelegramAccountManagement.add)
-    await cb.message.answer("➕ افزودن آیدی تلگرام\nشناسه عددی تلگرام جدید را وارد کنید.", reply_markup=admin_back_cancel(f"adm:tgsel:{reseller_id}")); await cb.answer()
+    await cb.message.answer("➕ افزودن آیدی تلگرام\nآیدی عددی یا یوزرنیم تلگرام جدید را وارد کنید (مثل 123456789 یا @username).", reply_markup=admin_back_cancel(f"adm:tgsel:{reseller_id}")); await cb.answer()
 
 @router.message(TelegramAccountManagement.add)
 async def telegram_account_add_value(message: Message, state: FSMContext) -> None:
-    try: telegram_id = int((message.text or '').strip())
-    except ValueError: await message.answer("شناسه تلگرام باید عدد صحیح باشد."); return
+    telegram_id, _, error = await resolve_input(message.bot, message.text)
+    if error: await message.answer(error); return
     data = await state.get_data(); reseller_id = int(data['reseller_id'])
     try:
         async with SessionLocal() as session, session.begin():
             await ResellerRepository(session).add_telegram_account(reseller_id, telegram_id, is_primary=False)
     except IntegrityError:
         await message.answer("این آیدی تلگرام قبلاً به یک ریسلر متصل شده است."); return
-    await state.clear(); await message.answer("✅ آیدی تلگرام به ریسلر اضافه شد.", reply_markup=panel())
+    await state.clear(); await answer_card(message, reseller_id, "✅ آیدی تلگرام به ریسلر اضافه شد.")
 
 @router.callback_query(F.data.startswith("adm:tg:remove:"))
 async def telegram_account_remove_list(cb: CallbackQuery, is_admin: bool) -> None:
@@ -937,15 +965,23 @@ async def telegram_account_primary_list(cb: CallbackQuery, is_admin: bool) -> No
 async def telegram_account_remove(cb: CallbackQuery, is_admin: bool) -> None:
     if not is_admin: return
     account_id = int(cb.data.rsplit(":", 1)[1])
-    async with SessionLocal() as session, session.begin(): ok = await ResellerRepository(session).remove_telegram_account(account_id)
-    await cb.message.answer("✅ آیدی تلگرام حذف شد." if ok else "حذف ممکن نیست؛ آخرین آیدی تلگرام ریسلر را نمی‌توان حذف کرد.", reply_markup=panel()); await cb.answer()
+    async with SessionLocal() as session, session.begin():
+        account = await session.get(ResellerTelegramAccount, account_id); reseller_id = account.reseller_id if account else None
+        ok = await ResellerRepository(session).remove_telegram_account(account_id)
+    note = "✅ آیدی تلگرام حذف شد." if ok else "حذف ممکن نیست؛ آخرین آیدی تلگرام ریسلر را نمی‌توان حذف کرد."
+    if reseller_id is None: await cb.message.answer(note, reply_markup=panel())
+    else: await answer_card(cb.message, reseller_id, note)
+    await cb.answer()
 
 @router.callback_query(F.data.startswith("adm:tg:primary:acct:"))
 async def telegram_account_primary(cb: CallbackQuery, is_admin: bool) -> None:
     if not is_admin: return
     account_id = int(cb.data.rsplit(":", 1)[1])
     async with SessionLocal() as session, session.begin(): account = await ResellerRepository(session).set_primary_telegram_account(account_id)
-    await cb.message.answer("✅ آیدی اصلی تلگرام تنظیم شد." if account else "آیدی تلگرام پیدا نشد.", reply_markup=panel()); await cb.answer()
+    note = "✅ آیدی اصلی تلگرام تنظیم شد." if account else "آیدی تلگرام پیدا نشد."
+    if account is None: await cb.message.answer(note, reply_markup=panel())
+    else: await answer_card(cb.message, account.reseller_id, note)
+    await cb.answer()
 
 @router.callback_query(F.data == "adm:balance")
 async def balance_start(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
@@ -984,7 +1020,7 @@ async def balance_confirm(cb: CallbackQuery, state: FSMContext, is_admin: bool) 
         else:
             delta = amount if action == 'increase' else -amount
             await BillingService(session).change_balance(reseller, delta, TransactionType(action), f"تغییر دستی موجودی توسط مدیر: {action}", cb.from_user.id)
-    await state.clear(); await cb.message.answer("✅ موجودی به‌روزرسانی شد.", reply_markup=panel()); await cb.answer()
+    await state.clear(); await answer_card(cb.message, int(data['reseller_id']), "✅ موجودی به‌روزرسانی شد."); await cb.answer()
 
 def _subscription_settings_text(mono_enabled: bool) -> str:
     return "\n".join([
@@ -1066,7 +1102,7 @@ def _group_view(data: dict, saved_now: bool = False):
     dirty = mode != ("all" if not saved else "custom") or (mode == "custom" and set(selected) != set(saved_selected))
     stale = [t for t in saved if t not in names]
     text = group_access_text(data["reseller_name"], names, selected, mode, group_summary(saved, 6), stale, data.get("disabled_count", 0), dirty, saved_now)
-    return text, group_access_keyboard(names, selected, mode)
+    return text, group_access_keyboard(names, selected, mode, int(data["reseller_id"]))
 
 
 @router.callback_query(F.data == "adm:inbounds")
@@ -1174,13 +1210,17 @@ async def send_tx_page(message: Message, reseller_id: int, tx_type: str, page: i
 @router.callback_query(F.data == "adm:rpt")
 async def report_start(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
     if not is_admin: return
-    await state.clear()
-    async with SessionLocal() as session: resellers = await ResellerRepository(session).list()
-    await cb.message.answer("📄 گزارش PDF دسته‌بندی‌شده\nمحدوده گزارش را انتخاب کنید.", reply_markup=report_scope_keyboard(resellers)); await cb.answer()
+    await state.clear(); await state.set_state(ReportScope.reseller)
+    await cb.message.answer(
+        "📄 گزارش PDF دسته‌بندی‌شده\n\n"
+        "• برای گزارش همه ریسلرها، دکمه‌ی «👥 همه ریسلرها» را بزنید.\n"
+        "• اگر گزارش یک ریسلر مشخص را می‌خواهید، فقط یوزرنیم (یا نام) همان ریسلر را برایم بفرستید تا گزارشش را جداگانه بسازم.",
+        reply_markup=report_scope_keyboard()); await cb.answer()
 
 @router.callback_query(F.data.startswith("adm:rpt:s:"))
-async def report_scope(cb: CallbackQuery, is_admin: bool) -> None:
+async def report_scope(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
     if not is_admin: return
+    await state.clear()
     scope = cb.data.rsplit(":", 1)[1]
     await cb.message.answer("بازه زمانی گزارش را انتخاب کنید.", reply_markup=report_period_keyboard(scope)); await cb.answer()
 

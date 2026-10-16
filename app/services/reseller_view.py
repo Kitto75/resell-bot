@@ -22,6 +22,7 @@ class ResellerRow:
     groups: list[str] = field(default_factory=list)  # empty == all groups
     telegram_ids: list[int] = field(default_factory=list)  # primary first
     created_text: str = ""
+    limits_text: str = ""
 
 
 def group_summary(groups: list[str], limit: int = 4) -> str:
@@ -62,8 +63,10 @@ def reseller_card_text(row: ResellerRow) -> str:
         f"💲 قیمت هر گیگابایت: {format_toman(row.price_per_gb)}",
         f"👥 اکانت‌های ساخته‌شده: {row.users}",
         f"🌐 دسترسی گروه‌ها: {group_summary(row.groups, 6)}",
-        f"🆔 تلگرام: {ids}",
     ]
+    if row.limits_text:
+        lines.append(f"🚦 محدودیت‌ها: {row.limits_text}")
+    lines.append(f"🆔 تلگرام: {ids}")
     if row.created_text:
         lines.append(f"🗓 تاریخ ثبت: {row.created_text}")
     return rtl_lines(lines)

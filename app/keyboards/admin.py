@@ -70,7 +70,7 @@ def tx_filter_keyboard(reseller_id: int) -> InlineKeyboardMarkup:
     }
     for tx_type, label in labels.items():
         rows.append([InlineKeyboardButton(text=label, callback_data=f"adm:txfilter:{reseller_id}:{tx_type.value}")])
-    rows.append([InlineKeyboardButton(text="⬅️ برگشت", callback_data="adm:tx"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")])
+    rows.append([InlineKeyboardButton(text="⬅️ برگشت", callback_data=f"adm:rc:{reseller_id}"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -80,7 +80,7 @@ def tx_page_keyboard(reseller_id: int, tx_type: str, page: int, has_next: bool) 
     if has_next: nav.append(InlineKeyboardButton(text="بعدی ➡️", callback_data=f"adm:txpage:{reseller_id}:{tx_type}:{page+1}"))
     rows = [nav] if nav else []
     rows.append([InlineKeyboardButton(text="🔎 تغییر فیلتر", callback_data=f"adm:txsel:{reseller_id}"), InlineKeyboardButton(text="📄 گزارش PDF", callback_data=f"adm:rpt:s:{reseller_id}")])
-    rows.append([InlineKeyboardButton(text="⬅️ برگشت", callback_data="adm:tx"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")])
+    rows.append([InlineKeyboardButton(text="⬅️ برگشت", callback_data=f"adm:rc:{reseller_id}"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -89,9 +89,8 @@ def resellers_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 لیست ریسلرها", callback_data="adm:reseller_list")],
         [InlineKeyboardButton(text="➕ افزودن ریسلر", callback_data="adm:add_reseller")],
-        [InlineKeyboardButton(text="✏️ ویرایش ریسلر", callback_data="adm:edit_reseller")],
-        [InlineKeyboardButton(text="💰 ویرایش موجودی", callback_data="adm:balance")],
-        [InlineKeyboardButton(text="👥 اکانت‌های تلگرام ریسلر", callback_data="adm:tg_accounts")],
+        [InlineKeyboardButton(text="📊 گزارش وضعیت ریسلرها (PDF)", callback_data="adm:rsnap")],
+        [InlineKeyboardButton(text="🚦 محدودیت‌های همگانی", callback_data="adm:lim")],
         [InlineKeyboardButton(text="⬅️ برگشت", callback_data="adm:panel"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")],
     ])
 
@@ -100,21 +99,22 @@ def edit_field_keyboard(reseller_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="نام نمایشی", callback_data=f"adm:editfield:{reseller_id}:display_name")],
         [InlineKeyboardButton(text="قیمت هر گیگابایت", callback_data=f"adm:editfield:{reseller_id}:price_per_gb")],
         [InlineKeyboardButton(text="وضعیت", callback_data=f"adm:editfield:{reseller_id}:status")],
-        [InlineKeyboardButton(text="⬅️ برگشت", callback_data="adm:resellers"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")],
+        [InlineKeyboardButton(text="⬅️ برگشت", callback_data=f"adm:rc:{reseller_id}"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")],
     ])
 
-def status_keyboard() -> InlineKeyboardMarkup:
+def status_keyboard(reseller_id: int | None = None) -> InlineKeyboardMarkup:
+    back = f"adm:editsel:{reseller_id}" if reseller_id is not None else "adm:resellers"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="فعال", callback_data="adm:editstatus:active"), InlineKeyboardButton(text="غیرفعال", callback_data="adm:editstatus:disabled")],
         [InlineKeyboardButton(text="بایگانی‌شده", callback_data="adm:editstatus:archived")],
-        [InlineKeyboardButton(text="⬅️ برگشت", callback_data="adm:edit_reseller"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")],
+        [InlineKeyboardButton(text="⬅️ برگشت", callback_data=back), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")],
     ])
 
 def balance_action_keyboard(reseller_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="افزایش", callback_data=f"adm:balact:{reseller_id}:increase"), InlineKeyboardButton(text="کاهش", callback_data=f"adm:balact:{reseller_id}:decrease")],
         [InlineKeyboardButton(text="تنظیم موجودی", callback_data=f"adm:balact:{reseller_id}:set_balance")],
-        [InlineKeyboardButton(text="⬅️ برگشت", callback_data="adm:balance"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")],
+        [InlineKeyboardButton(text="⬅️ برگشت", callback_data=f"adm:rc:{reseller_id}"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")],
     ])
 
 def recharge_actions(request_id: int) -> InlineKeyboardMarkup:
@@ -139,6 +139,7 @@ def backup_keyboard(enabled: bool) -> InlineKeyboardMarkup:
         [toggle],
         [InlineKeyboardButton(text="تغییر فاصله زمانی", callback_data="adm:backup:interval")],
         [InlineKeyboardButton(text="دریافت بکاپ الان", callback_data="adm:backup:now")],
+        [InlineKeyboardButton(text="🤖 بات بکاپ", callback_data="adm:backup:bot")],
         [InlineKeyboardButton(text="برگشت", callback_data="adm:panel")],
     ])
 
@@ -148,7 +149,7 @@ def telegram_accounts_actions(reseller_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="➕ افزودن آیدی تلگرام", callback_data=f"adm:tg:add:{reseller_id}")],
         [InlineKeyboardButton(text="➖ حذف آیدی تلگرام", callback_data=f"adm:tg:remove:{reseller_id}")],
         [InlineKeyboardButton(text="⭐ تنظیم به عنوان اصلی", callback_data=f"adm:tg:primary:{reseller_id}")],
-        [InlineKeyboardButton(text="⬅️ برگشت", callback_data="adm:resellers"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")],
+        [InlineKeyboardButton(text="⬅️ برگشت", callback_data=f"adm:rc:{reseller_id}"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")],
     ])
 
 def telegram_account_keyboard(accounts, action: str, back_reseller_id: int) -> InlineKeyboardMarkup:
@@ -164,8 +165,7 @@ def reseller_bulk_actions_keyboard(reseller_id: int, disable_count: int | None =
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"⏸ غیرفعال‌سازی همه یوزرها{disable_suffix}", callback_data=f"adm:ru:bulk:{reseller_id}:disable")],
         [InlineKeyboardButton(text=f"▶️ فعال‌سازی همه یوزرها{enable_suffix}", callback_data=f"adm:ru:bulk:{reseller_id}:enable")],
-        [InlineKeyboardButton(text="👤 کارت ریسلر", callback_data=f"adm:rc:{reseller_id}")],
-        [InlineKeyboardButton(text="⬅️ انتخاب ریسلر", callback_data="adm:reseller_users"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")],
+        [InlineKeyboardButton(text="⬅️ برگشت", callback_data=f"adm:rc:{reseller_id}"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")],
     ])
 
 
@@ -205,11 +205,11 @@ def renewal_settings_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-def report_scope_keyboard(resellers: list[Reseller]) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text="👥 همه ریسلرها", callback_data="adm:rpt:s:all")]]
-    rows += [[InlineKeyboardButton(text=r.display_name, callback_data=f"adm:rpt:s:{r.id}")] for r in resellers]
-    rows.append([InlineKeyboardButton(text="⬅️ برگشت", callback_data="adm:panel"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+def report_scope_keyboard(resellers=None) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 همه ریسلرها", callback_data="adm:rpt:s:all")],
+        [InlineKeyboardButton(text="⬅️ برگشت", callback_data="adm:panel"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")],
+    ])
 
 
 def report_period_keyboard(scope: str) -> InlineKeyboardMarkup:
@@ -247,6 +247,7 @@ def reseller_card_keyboard(reseller_id: int, status: str, list_view: str = "a") 
         [InlineKeyboardButton(text="✏️ ویرایش", callback_data=f"adm:editsel:{rid}"), InlineKeyboardButton(text="💰 موجودی", callback_data=f"adm:balsel:{rid}")],
         [InlineKeyboardButton(text="🌐 گروه‌ها", callback_data=f"adm:inbsel:{rid}"), InlineKeyboardButton(text="🧾 تراکنش‌ها", callback_data=f"adm:txsel:{rid}")],
         [InlineKeyboardButton(text="👥 یوزرها", callback_data=f"adm:rusel:{rid}"), InlineKeyboardButton(text="🆔 آیدی‌های تلگرام", callback_data=f"adm:tgsel:{rid}")],
+        [InlineKeyboardButton(text="🚦 محدودیت‌ها", callback_data=f"adm:lim:r:{rid}")],
         status_row,
         [InlineKeyboardButton(text="🗑 حذف ریسلر", callback_data=f"adm:rdel:{rid}")],
         [InlineKeyboardButton(text="⬅️ لیست ریسلرها", callback_data=f"adm:rl:{list_view}:0")],
@@ -270,14 +271,15 @@ def reseller_hard_delete_keyboard(reseller_id: int) -> InlineKeyboardMarkup:
     ])
 
 
-def group_access_keyboard(names: list[str], selected: list[str], mode: str) -> InlineKeyboardMarkup:
+def group_access_keyboard(names: list[str], selected: list[str], mode: str, reseller_id: int | None = None) -> InlineKeyboardMarkup:
     all_mode = mode == "all"
     rows = [[InlineKeyboardButton(text=f"{'✅' if all_mode else '⬜'} همه گروه‌ها (بدون محدودیت)", callback_data="adm:inb:all")]]
     for index, name in enumerate(names):
         checked = all_mode or name in selected
         rows.append([InlineKeyboardButton(text=f"{'✅' if checked else '⬜'} {name}", callback_data=f"adm:inb:t:{index}")])
     rows.append([InlineKeyboardButton(text="💾 ذخیره", callback_data="adm:inb:save")])
-    rows.append([InlineKeyboardButton(text="⬅️ برگشت", callback_data="adm:inbounds"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")])
+    back = f"adm:rc:{reseller_id}" if reseller_id is not None else "adm:inbounds"
+    rows.append([InlineKeyboardButton(text="⬅️ برگشت", callback_data=back), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -287,3 +289,45 @@ def subscription_settings_keyboard(mono_enabled: bool) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=toggle, callback_data="adm:subset:toggle")],
         [InlineKeyboardButton(text="⬅️ پنل مدیریت", callback_data="adm:panel")],
     ])
+
+
+def limits_keyboard(scope: str, has_custom: bool = False) -> InlineKeyboardMarkup:
+    """scope: 'g' = global, or a reseller id."""
+    from app.services.limits import FIELD_LABELS, FIELDS
+    rows = [[InlineKeyboardButton(text=f"✏️ {FIELD_LABELS[f]}", callback_data=f"adm:lim:f:{scope}:{f}")] for f in FIELDS]
+    if scope == "g":
+        rows.append([InlineKeyboardButton(text="⬅️ برگشت", callback_data="adm:resellers"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")])
+    else:
+        if has_custom: rows.append([InlineKeyboardButton(text="↩️ برگشت به تنظیمات همگانی", callback_data=f"adm:lim:reset:{scope}")])
+        rows.append([InlineKeyboardButton(text="⬅️ برگشت", callback_data=f"adm:rc:{scope}"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def limit_value_keyboard(scope: str, field: str) -> InlineKeyboardMarkup:
+    back = "adm:lim" if scope == "g" else f"adm:lim:r:{scope}"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚫 بدون محدودیت", callback_data=f"adm:lim:none:{scope}:{field}")],
+        [InlineKeyboardButton(text="⬅️ برگشت", callback_data=back), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")],
+    ])
+
+
+def disable_prompt_keyboard(reseller_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔕 بدون پیام (ربات ساکت می‌ماند)", callback_data=f"adm:rc:dis:{reseller_id}")],
+        [InlineKeyboardButton(text="⬅️ برگشت", callback_data=f"adm:rc:{reseller_id}"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")],
+    ])
+
+
+def reseller_matches_keyboard(resellers) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text=r.display_name, callback_data=f"adm:rc:{r.id}")] for r in resellers]
+    rows.append([InlineKeyboardButton(text="📋 لیست ریسلرها", callback_data="adm:reseller_list")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def backup_bot_keyboard(has_token: bool) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text="🔑 تنظیم توکن بات بکاپ" if not has_token else "🔑 تغییر توکن بات بکاپ", callback_data="adm:backup:bot:set")]]
+    if has_token:
+        rows.append([InlineKeyboardButton(text="📨 ارسال پیام تست", callback_data="adm:backup:bot:test")])
+        rows.append([InlineKeyboardButton(text="🗑 حذف توکن (برگشت به همین بات)", callback_data="adm:backup:bot:clear")])
+    rows.append([InlineKeyboardButton(text="⬅️ برگشت", callback_data="adm:backup")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)

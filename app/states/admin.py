@@ -44,6 +44,7 @@ class RejectRecharge(StatesGroup):
 
 class BackupSettings(StatesGroup):
     interval = State()
+    bot_token = State()
 
 
 class TelegramAccountManagement(StatesGroup):
@@ -85,3 +86,15 @@ class AdminResellerUsers(StatesGroup):
     select_reseller = State()
     browse = State()
     user = State()
+
+
+class LimitEdit(StatesGroup):
+    value = State()
+
+
+class DisableReseller(StatesGroup):
+    message = State()
+
+
+class ReportScope(StatesGroup):
+    reseller = State()

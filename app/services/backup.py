@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import tempfile
 import zipfile
@@ -20,6 +21,8 @@ logger = logging.getLogger(__name__)
 BACKUP_ENABLED_KEY = "backup_enabled"
 BACKUP_INTERVAL_KEY = "backup_interval_minutes"
 BACKUP_LAST_TIME_KEY = "backup_last_time"
+BACKUP_BOT_TOKEN_KEY = "backup_bot_token"
+BOT_TOKEN_RE = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{30,}$")
 DEFAULT_BACKUP_INTERVAL_MINUTES = 60
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ZIP_COMPRESSION_LEVEL = 9
@@ -168,6 +171,51 @@ async def set_backup_interval(minutes: int) -> None:
         await SettingsRepository(session).set(BACKUP_INTERVAL_KEY, str(minutes))
 
 
+async def get_backup_bot_token() -> str | None:
+    from app.database.repositories import SettingsRepository
+    from app.database.session import SessionLocal
+
+    async with SessionLocal() as session:
+        return (await SettingsRepository(session).get(BACKUP_BOT_TOKEN_KEY)) or None
+
+
+async def set_backup_bot_token(token: str | None) -> None:
+    from app.database.repositories import SettingsRepository
+    from app.database.session import SessionLocal
+
+    async with SessionLocal() as session, session.begin():
+        await SettingsRepository(session).set(BACKUP_BOT_TOKEN_KEY, token or "")
+
+
+async def validate_backup_bot_token(token: str) -> str:
+    """Returns the bot's @username or raises ValueError with a message that is safe to show."""
+    if not BOT_TOKEN_RE.fullmatch(token):
+        raise ValueError("فرمت توکن درست نیست. توکن را دقیقاً همان‌طور که BotFather داده بفرستید (مثل 123456789:AA...).")
+    probe = Bot(token)
+    try:
+        me = await probe.get_me()
+    except Exception as exc:
+        raise ValueError("تلگرام این توکن را قبول نکرد. توکن را از BotFather دوباره بررسی کنید.") from exc
+    finally:
+        await probe.session.close()
+    return me.username or str(me.id)
+
+
+async def send_backup_bot_test(main_bot: Bot, admin_id: int) -> tuple[bool, str]:
+    token = await get_backup_bot_token()
+    if not token:
+        return False, "توکنی ثبت نشده است."
+    probe = Bot(token)
+    try:
+        await probe.send_message(admin_id, "✅ پیام تست بات بکاپ. بکاپ‌ها از این به بعد از همین بات ارسال می‌شوند.")
+        return True, ""
+    except Exception as exc:
+        logger.warning("Backup bot test message failed: %s", type(exc).__name__)
+        return False, "ارسال نشد. اول داخل بات بکاپ /start بزنید و بعد دوباره تست کنید."
+    finally:
+        await probe.session.close()
+
+
 async def send_database_backup(bot: Bot, admin_ids: list[int] | None = None) -> bool:
     settings = get_settings()
     try:
@@ -184,8 +232,22 @@ async def send_database_backup(bot: Bot, admin_ids: list[int] | None = None) -> 
         zip_path, temp_dir = create_backup_zip_archive(db_path, settings.timezone)
         document = FSInputFile(zip_path, filename=zip_path.name)
         targets = admin_ids or settings.admin_ids
-        for admin_id in targets:
-            await bot.send_document(admin_id, document, caption="💾 بکاپ پایگاه داده SQLite (ZIP)")
+        token = await get_backup_bot_token()
+        alt_bot = Bot(token) if token and token != bot.token else None  # optional separate bot just for backups
+        try:
+            for admin_id in targets:
+                caption = "💾 بکاپ پایگاه داده SQLite (ZIP)"
+                if alt_bot is not None:
+                    try:
+                        await alt_bot.send_document(admin_id, document, caption=caption)
+                        continue
+                    except Exception as exc:  # most likely: the admin never pressed /start in the backup bot
+                        logger.warning("Backup bot could not deliver to admin_id=%s (%s); falling back to the main bot", admin_id, type(exc).__name__)
+                        caption += "\n⚠️ ارسال با بات بکاپ ممکن نشد؛ داخل آن بات /start بزنید."
+                await bot.send_document(admin_id, document, caption=caption)
+        finally:
+            if alt_bot is not None:
+                await alt_bot.session.close()
         date, time = persian_date_time(settings.timezone)
         from app.database.repositories import SettingsRepository
         from app.database.session import SessionLocal

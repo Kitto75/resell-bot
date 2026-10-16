@@ -8,13 +8,17 @@ from decimal import Decimal
 from pathlib import Path
 
 import jdatetime
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database.models import BalanceTransaction, OperationLog, OperationType, Reseller, ResellerStatus, TransactionType
+from app.database.models import BalanceTransaction, CreatedUser, OperationLog, OperationType, Reseller, ResellerStatus, TransactionType
+from app.database.repositories import InboundRepository, ResellerRepository
+from app.services.bulk_users import build_plan
 from app.services.datetime import jalali_datetime_text, tehran_now
+from app.services.limits import describe, effective_detail
+from app.services.marzban import MarzbanError
 from app.services.reports import clean_tx_description, tx_type_label
-from app.utils.formatting import format_toman
+from app.utils.formatting import format_toman, status_fa
 
 logger = logging.getLogger(__name__)
 MAX_ROWS_PER_SECTION = 2000
@@ -49,6 +53,7 @@ class ReportData:
     generated_text: str
     summary: Section
     sections: list[Section] = field(default_factory=list)
+    title: str = "گزارش مالی و عملیات ریسلرها"
 
 
 # ---------------------------------------------------------------- data collection
@@ -138,6 +143,42 @@ async def collect_report_data(session: AsyncSession, reseller_id: int | None, pe
     return ReportData(scope_label, PERIOD_LABELS.get(period, period), jalali_datetime_text(datetime.now(timezone.utc), tz_name), summary, sections)
 
 
+async def collect_snapshot_data(session, client, tz_name: str) -> ReportData:
+    """Right-now status of every reseller: money, accounts by panel status, access groups, limits, telegram ids."""
+    repo, inbound_repo = ResellerRepository(session), InboundRepository(session)
+    resellers = await repo.list(include_archived=True)
+    summary_rows, access_rows = [], []
+    totals = {"balance": Decimal("0"), "accounts": 0, "active_resellers": 0}
+    for r in resellers:
+        usernames = list((await session.scalars(select(CreatedUser.username).where(CreatedUser.reseller_id == r.id))).all())
+        by_status: dict[str, int] | None = {}
+        if usernames:
+            try:
+                by_status = build_plan("disable", usernames, await client.list_users_by_usernames(usernames)).by_status
+            except MarzbanError:
+                by_status = None  # panel unreachable: show dashes instead of wrong numbers
+        def cell(*statuses: str) -> str:
+            return "-" if by_status is None else str(sum(by_status.get(st, 0) for st in statuses))
+        last_op = await session.scalar(select(func.max(OperationLog.created_at)).where(OperationLog.reseller_id == r.id))
+        status = str(getattr(r.status, "value", r.status))
+        totals["balance"] += Decimal(r.balance); totals["accounts"] += len(usernames); totals["active_resellers"] += status == "active"
+        summary_rows.append([r.display_name, status_fa(status) if status != "archived" else "بایگانی", format_toman(r.balance), format_toman(r.price_per_gb), str(len(usernames)),
+                             cell("active"), cell("on_hold"), cell("disabled"), cell("expired", "limited"), jalali_datetime_text(last_op, tz_name) if last_op else "-"])
+        detail = await effective_detail(session, r.id)
+        groups = sorted(await inbound_repo.allowed_tags(r.id))
+        accounts = await repo.telegram_accounts(r.id)
+        access_rows.append([r.display_name, "همه گروه‌ها" if not groups else "، ".join(groups), describe(detail["max_days"][0], "max_days"), describe(detail["min_gb"][0], "min_gb"), describe(detail["max_gb"][0], "max_gb"),
+                            "، ".join(str(a.telegram_id) for a in accounts) or str(r.telegram_id)])
+    summary = Section(
+        "وضعیت لحظه‌ای ریسلرها",
+        ["ریسلر", "وضعیت", "موجودی", "قیمت هر GB", "اکانت‌ها", "فعال", "در انتظار اتصال", "غیرفعال", "منقضی/حجم تمام", "آخرین عملیات"],
+        summary_rows,
+        footer=f"تعداد ریسلرها: {len(resellers)} (فعال: {totals['active_resellers']})  |  جمع موجودی: {format_toman(totals['balance'])}  |  جمع اکانت‌ها: {totals['accounts']}",
+    )
+    access = Section("دسترسی گروه‌ها، محدودیت‌ها و آیدی تلگرام", ["ریسلر", "گروه‌های مجاز", "حداکثر روز", "حداقل حجم", "حداکثر حجم", "آیدی تلگرام"], access_rows)
+    return ReportData("همه ریسلرها", "وضعیت لحظه‌ای", jalali_datetime_text(datetime.now(timezone.utc), tz_name), summary, [access], title="گزارش وضعیت ریسلرها")
+
+
 # ---------------------------------------------------------------- rendering
 def _find_fonts(custom_path: str | None) -> tuple[str, str]:
     if custom_path:
@@ -211,7 +252,7 @@ def build_report_pdf(data: ReportData, output_path: str | Path, font_path: str |
         return t
 
     story = [
-        Paragraph(shape("گزارش مالی و عملیات ریسلرها"), title_style),
+        Paragraph(shape(data.title), title_style),
         Paragraph(shape(f"محدوده: {data.scope_label}   |   بازه: {data.period_label}   |   تاریخ تهیه: {data.generated_text}"), meta_style),
         Spacer(1, 6 * mm),
     ]
