@@ -1,6 +1,6 @@
 from __future__ import annotations
 import asyncio, logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 import aiohttp
 from urllib.parse import urljoin
@@ -8,7 +8,7 @@ from urllib.parse import urljoin
 logger = logging.getLogger(__name__)
 
 _SECRET_KEYS = {"token", "access_token", "authorization", "password", "passwd", "secret", "api_key", "apikey"}
-_INTERNAL_CREATE_KEYS = {"validity_days"}
+_INTERNAL_CREATE_KEYS = {"validity_days", "on_hold_days"}  # bot-only hints, never sent to the panel as-is
 _SAFE_CREATE_KEYS = {"username", "status", "data_limit", "on_hold_expire_duration", "group_ids", "data_limit_reset_strategy", "note"}
 _ON_HOLD_ACTIVATION_KEYS = {"expire", "on_hold_timeout", "on_hold_timeout_duration", "activation_deadline", "activate_at", "active_at"}
 
@@ -62,6 +62,20 @@ class MarzbanClient:
             users = data.get("users") or data.get("items") or []
             return [normalize_user(user) for user in users if isinstance(user, dict)]
         return [user for user in data if isinstance(user, dict)] if isinstance(data, list) else []
+    async def list_all_users(self, page_size: int = 500, max_pages: int = 2000) -> list[dict[str, Any]]:
+        """Every user of the panel, page by page (stops on an empty page or when `total` is reached)."""
+        if not self._token: await self.login()
+        users: list[dict[str, Any]] = []
+        offset = 0
+        for _ in range(max_pages):
+            data = await self._request("GET", "/api/users", params={"offset": offset, "limit": page_size})
+            batch = [u for u in ((data.get("users") if isinstance(data, dict) else data) or []) if isinstance(u, dict)]
+            if not batch: break
+            users.extend(normalize_user(u) for u in batch)
+            offset += len(batch)
+            total = data.get("total") if isinstance(data, dict) else None
+            if isinstance(total, int) and offset >= total: break
+        return users
     async def list_users_by_usernames(self, usernames: list[str], chunk_size: int = 100) -> list[dict[str, Any]]:
         """Fetch many users (with id/status) in a few requests instead of one request per user."""
         if not self._token: await self.login()
@@ -115,7 +129,7 @@ class MarzbanClient:
         return data
     async def create_user(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not self._token: await self.login()
-        sanitized_payload = prepare_create_payload(payload, payload.get("validity_days"))
+        sanitized_payload = prepare_create_payload(payload, payload.get("validity_days"), payload.get("on_hold_days"))
         logger.info("Marzban create-user sanitized payload summary: %s", create_payload_summary(sanitized_payload))
         logger.debug("Marzban create-user sanitized payload: %s", redact_secrets(sanitized_payload))
         logger.info("Marzban create-user attempt username=%s", sanitized_payload.get("username"))
@@ -152,7 +166,10 @@ class MarzbanClient:
         prepared.setdefault("data_limit_reset_strategy", "no_reset")
         if not prepared.get("group_ids"):
             prepared["group_ids"] = await self._resolve_group_ids(allowed_inbound_tags)
-        return prepare_create_payload(prepared, payload.get("validity_days"))
+        result = prepare_create_payload(prepared, payload.get("validity_days"), payload.get("on_hold_days"))
+        if payload.get("on_hold_days"):
+            result["on_hold_days"] = int(payload["on_hold_days"])  # create_user() recomputes the deadline from "now"
+        return result
     async def _resolve_group_ids(self, allowed_group_names: list[str] | None = None) -> list[int]:
         # Empty/None allowed list means "all enabled groups" (same meaning as "all inbounds" before).
         groups = await self.get_inbounds()
@@ -239,10 +256,15 @@ def create_payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "data_limit_reset_strategy": payload.get("data_limit_reset_strategy"),
         "note": payload.get("note"),
         "activation_keys_present": sorted(key for key in _ON_HOLD_ACTIVATION_KEYS if key in payload),
+        "on_hold_days": payload.get("on_hold_days"),
     }
 
 
-def prepare_create_payload(payload: dict[str, Any], validity_days: int | None = None) -> dict[str, Any]:
+def on_hold_timeout_iso(days: int, now: datetime | None = None) -> str:
+    return ((now or datetime.now(timezone.utc)) + timedelta(days=days)).replace(microsecond=0).isoformat()
+
+
+def prepare_create_payload(payload: dict[str, Any], validity_days: int | None = None, on_hold_days: int | None = None) -> dict[str, Any]:
     dropped_keys = sorted(key for key in payload if key not in _SAFE_CREATE_KEYS and key not in _INTERNAL_CREATE_KEYS)
     if dropped_keys:
         logger.warning("Dropping unsafe Marzban create-user payload keys username=%s keys=%s", payload.get("username"), dropped_keys)
@@ -259,6 +281,10 @@ def prepare_create_payload(payload: dict[str, Any], validity_days: int | None = 
         prepared["on_hold_expire_duration"] = int(prepared["on_hold_expire_duration"])
         if prepared["on_hold_expire_duration"] <= 0:
             raise ValueError("on_hold_expire_duration must be greater than zero for on_hold users")
+        # Admin setting "on_hold days": the panel leaves on_hold by itself at this moment even if the user never connected.
+        # Without the setting no deadline is sent and the account stays on_hold until the first connection.
+        if on_hold_days and int(on_hold_days) > 0:
+            prepared["on_hold_timeout"] = on_hold_timeout_iso(int(on_hold_days))
     return prepared
 
 

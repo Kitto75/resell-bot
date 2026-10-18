@@ -14,8 +14,8 @@ from app.config import get_settings
 from app.database.models import RechargeStatus, ResellerStatus, ResellerTelegramAccount, TransactionType
 from app.database.repositories import CreatedUserRepository, InboundRepository, RechargeRepository, ResellerRepository, SettingsRepository, TransactionRepository
 from app.database.session import SessionLocal
-from app.keyboards.admin import group_access_keyboard, subscription_settings_keyboard, reseller_card_keyboard, reseller_delete_keyboard, reseller_hard_delete_keyboard, reseller_list_keyboard, report_period_keyboard, report_scope_keyboard, admin_back_cancel, backup_keyboard, balance_action_keyboard, confirm_keyboard, destructive_confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_reject_keyboard, renewal_settings_keyboard, resellers_keyboard, resellers_menu, status_keyboard, reseller_bulk_actions_keyboard, reseller_bulk_confirm_keyboard, reseller_user_actions_keyboard, reseller_users_page_keyboard, telegram_account_keyboard, telegram_accounts_actions, tx_filter_keyboard, tx_page_keyboard
-from app.services.delivery import SUB_MONO_KEY, send_account_message
+from app.keyboards.admin import group_access_keyboard, reseller_card_keyboard, reseller_delete_keyboard, reseller_hard_delete_keyboard, reseller_list_keyboard, report_period_keyboard, report_scope_keyboard, admin_back_cancel, backup_keyboard, balance_action_keyboard, confirm_keyboard, destructive_confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_reject_keyboard, resellers_keyboard, resellers_menu, status_keyboard, reseller_bulk_actions_keyboard, reseller_bulk_confirm_keyboard, reseller_user_actions_keyboard, reseller_users_page_keyboard, telegram_account_keyboard, telegram_accounts_actions, tx_filter_keyboard, tx_page_keyboard
+from app.services.delivery import send_account_message
 from app.services.datetime import jalali_datetime_text, jalali_filename_datetime
 from app.services.bulk_users import build_plan, execute_plan, fetch_plan
 from app.services.reseller_view import PAGE_SIZE as RESELLER_PAGE_SIZE, ResellerRow, delete_choice_text, group_access_text, group_summary, hard_delete_confirm_text, reseller_card_text, reseller_list_text
@@ -28,7 +28,8 @@ from app.services.validators import valid_username
 from app.services.backup import get_backup_status, send_database_backup, set_backup_enabled, set_backup_interval, sqlite_backup_supported
 from app.services.billing import BYTES_PER_GB, BillingService
 from app.services.marzban import MarzbanClient, MarzbanError, create_payload_summary, extract_last_user_agent, marzban_payload_debug_structure, on_hold_expire_duration
-from app.services.renewal import RenewalMode, calculate_renewal, renewal_mode_confirmation_text, renewal_mode_fa
+from app.services.bot_settings import get_on_hold_days
+from app.services.renewal import RenewalMode, calculate_renewal, renewal_mode_confirmation_text, renewal_wording
 from app.utils.formatting import format_bytes_to_gb, format_remaining_time, format_toman, status_fa
 from app.states.admin import AddReseller, AdminCreateMarzbanUser, AdminDeleteMarzbanUser, AdminDisableMarzbanUser, AdminEnableMarzbanUser, AdminRenewMarzbanUser, AdminResellerUsers, BackupSettings, BalanceEdit, EditReseller, InboundPermissions, MaintenanceMode, RechargeModeration, TelegramAccountManagement, TransactionBrowsing
 
@@ -207,28 +208,6 @@ async def panel_cb(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None
     await state.clear(); await show_panel(cb.message); await cb.answer()
 
 
-@router.callback_query(F.data == "adm:renewal_settings")
-async def renewal_settings_cb(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
-    if not is_admin: await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
-    async with SessionLocal() as session:
-        mode = await SettingsRepository(session).get_renewal_mode()
-    await state.clear()
-    await cb.message.answer(
-        f"⚙️ تنظیمات تمدید\n\nحالت فعلی: تمدید {renewal_mode_fa(mode)}\n\nدر حالت افزایشی، حجم و روز جدید به مقدار قبلی اضافه می‌شود.\n\nدر حالت ریست و جایگزینی، مصرف کاربر صفر می‌شود و حجم و روز جدید جایگزین دوره قبلی می‌شود.",
-        reply_markup=renewal_settings_keyboard(),
-    )
-    await cb.answer()
-
-@router.callback_query(F.data.startswith("adm:renewal:set:"))
-async def renewal_settings_set_cb(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
-    if not is_admin: await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
-    mode = cb.data.rsplit(":", 1)[1]
-    async with SessionLocal() as session, session.begin():
-        await SettingsRepository(session).set_renewal_mode(mode)
-    await state.clear()
-    await cb.message.answer(f"✅ حالت تمدید روی تمدید {renewal_mode_fa(mode)} تنظیم شد.", reply_markup=panel())
-    await cb.answer()
-
 @router.callback_query(F.data == "adm:mb:create")
 async def admin_create_marzban_start(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
     if not is_admin:
@@ -276,6 +255,8 @@ async def admin_create_marzban_confirm(cb: CallbackQuery, state: FSMContext, is_
     data = await state.get_data(); username = data["username"]; gb = int(data["gb"]); days = int(data["days"])
     marzban = client()
     payload = {"username": username, "status": "on_hold", "data_limit": gb * BYTES_PER_GB, "on_hold_expire_duration": on_hold_expire_duration(days), "validity_days": days, "note": f"created by admin {cb.from_user.id}"}
+    async with SessionLocal() as session: hold_days = await get_on_hold_days(session)
+    if hold_days: payload["on_hold_days"] = hold_days  # admin setting: leave on_hold after N days
     try:
         try:
             await marzban.get_user(username)
@@ -316,7 +297,8 @@ async def admin_renew_marzban_username(message: Message, state: FSMContext, is_a
 @router.callback_query(AdminRenewMarzbanUser.confirm_user, F.data == "adm:mb:renew:user_confirm")
 async def admin_renew_marzban_confirm_user(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
     if not is_admin: return
-    await state.set_state(AdminRenewMarzbanUser.gb); await cb.message.answer("حجم اضافه را به گیگابایت وارد کنید:", reply_markup=admin_back_cancel("adm:mb:renew")); await cb.answer()
+    async with SessionLocal() as session: wording = renewal_wording(await SettingsRepository(session).get_renewal_mode())
+    await state.set_state(AdminRenewMarzbanUser.gb); await cb.message.answer(f"{wording['gb_prompt']}:", reply_markup=admin_back_cancel("adm:mb:renew")); await cb.answer()
 
 
 @router.message(AdminRenewMarzbanUser.gb)
@@ -326,7 +308,8 @@ async def admin_renew_marzban_gb(message: Message, state: FSMContext, is_admin: 
     except ValueError: await message.answer("یک عدد معتبر وارد کنید."); return
     if gb <= 0: await message.answer("حجم باید بیشتر از صفر باشد."); return
     await state.update_data(gb=gb); await state.set_state(AdminRenewMarzbanUser.days)
-    await message.answer("روزهای اضافه را وارد کنید:", reply_markup=admin_back_cancel("adm:mb:renew"))
+    async with SessionLocal() as session: wording = renewal_wording(await SettingsRepository(session).get_renewal_mode())
+    await message.answer(f"{wording['days_prompt']}:", reply_markup=admin_back_cancel("adm:mb:renew"))
 
 
 @router.message(AdminRenewMarzbanUser.days)
@@ -338,7 +321,8 @@ async def admin_renew_marzban_days(message: Message, state: FSMContext, is_admin
     data = await state.update_data(days=days); await state.set_state(AdminRenewMarzbanUser.confirm)
     async with SessionLocal() as session:
         mode = await SettingsRepository(session).get_renewal_mode()
-    await message.answer(f"خلاصه تمدید توسط مدیر\nنام کاربری: {data['username']}\nحجم واردشده: {data['gb']} گیگابایت\nزمان واردشده: {days} روز\nهزینه/کسر موجودی: ندارد\n\n{renewal_mode_confirmation_text(mode)}\n\nآیا تمدید تایید شود؟", reply_markup=confirm_keyboard("adm:mb:renew:confirm", "adm:mb:renew"))
+    wording = renewal_wording(mode)
+    await message.answer(f"خلاصه تمدید توسط مدیر\nنام کاربری: {data['username']}\n{wording['gb_label']}: {data['gb']} گیگابایت\n{wording['days_label']}: {days} روز\nهزینه/کسر موجودی: ندارد\n\n{renewal_mode_confirmation_text(mode)}\n\nآیا تمدید تایید شود؟", reply_markup=confirm_keyboard("adm:mb:renew:confirm", "adm:mb:renew"))
 
 
 @router.callback_query(AdminRenewMarzbanUser.confirm, F.data == "adm:mb:renew:confirm")
@@ -1021,41 +1005,6 @@ async def balance_confirm(cb: CallbackQuery, state: FSMContext, is_admin: bool) 
             delta = amount if action == 'increase' else -amount
             await BillingService(session).change_balance(reseller, delta, TransactionType(action), f"تغییر دستی موجودی توسط مدیر: {action}", cb.from_user.id)
     await state.clear(); await answer_card(cb.message, int(data['reseller_id']), "✅ موجودی به‌روزرسانی شد."); await cb.answer()
-
-def _subscription_settings_text(mono_enabled: bool) -> str:
-    return "\n".join([
-        "🔗 تنظیمات سابسکریپشن",
-        "━━━━━━━━━━━━━━",
-        f"ارسال لینک اشتراک به‌صورت Mono: {'✅ روشن' if mono_enabled else '⬜ خاموش'}",
-        "",
-        "• روشن: لینک داخل کادر mono می‌آید و با یک لمس کپی می‌شود.",
-        "• خاموش: لینک به‌صورت متن عادی ارسال می‌شود.",
-        "",
-        "این تنظیم روی همه‌ی پیام‌های لینک اشتراک اثر دارد: ساخت اکانت و دریافت لینک و QR، هم برای ریسلرها و هم برای مدیر.",
-    ])
-
-
-@router.callback_query(F.data == "adm:subset")
-async def subscription_settings_cb(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
-    if not is_admin:
-        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
-    await state.clear()
-    async with SessionLocal() as session: enabled = await SettingsRepository(session).get_bool(SUB_MONO_KEY, True)
-    await edit_or_answer(cb, _subscription_settings_text(enabled), subscription_settings_keyboard(enabled)); await cb.answer()
-
-
-@router.callback_query(F.data == "adm:subset:toggle")
-async def subscription_settings_toggle(cb: CallbackQuery, is_admin: bool) -> None:
-    if not is_admin:
-        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
-    async with SessionLocal() as session, session.begin():
-        repo = SettingsRepository(session)
-        enabled = not await repo.get_bool(SUB_MONO_KEY, True)
-        await repo.set_bool(SUB_MONO_KEY, enabled)
-    logger.info("Admin changed subscription link mono format admin_id=%s mono=%s", cb.from_user.id, enabled)
-    await edit_or_answer(cb, _subscription_settings_text(enabled), subscription_settings_keyboard(enabled))
-    await cb.answer("✅ روشن شد." if enabled else "✅ خاموش شد.")
-
 
 @router.message(Command("maintenance"))
 async def maintenance_cmd(message: Message, state: FSMContext, is_admin: bool) -> None:

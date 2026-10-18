@@ -4,15 +4,14 @@ from app.database.models import Reseller, TransactionType
 
 def panel() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👥 مدیریت ریسلرها", callback_data="adm:resellers"), InlineKeyboardButton(text="➕ افزودن ریسلر", callback_data="adm:add_reseller")],
+        [InlineKeyboardButton(text="👥 مدیریت ریسلرها", callback_data="adm:resellers")],
         [InlineKeyboardButton(text="➕ ساخت کاربر", callback_data="adm:mb:create"), InlineKeyboardButton(text="♻️ تمدید کاربر", callback_data="adm:mb:renew")],
         [InlineKeyboardButton(text="⏸ غیرفعال‌سازی کاربر", callback_data="adm:mb:disable"), InlineKeyboardButton(text="▶️ فعال‌سازی کاربر", callback_data="adm:mb:enable")],
         [InlineKeyboardButton(text="🗑 حذف کاربر", callback_data="adm:mb:delete")],
-        [InlineKeyboardButton(text="👥 یوزرهای ریسلر", callback_data="adm:reseller_users")],
         [InlineKeyboardButton(text="🧾 تراکنش‌ها", callback_data="adm:tx"), InlineKeyboardButton(text="🌐 دسترسی گروه‌ها", callback_data="adm:inbounds")],
         [InlineKeyboardButton(text="📄 گزارش PDF", callback_data="adm:rpt")],
-        [InlineKeyboardButton(text="⚙️ تنظیمات تمدید", callback_data="adm:renewal_settings"), InlineKeyboardButton(text="🔗 تنظیمات سابسکریپشن", callback_data="adm:subset")],
-        [InlineKeyboardButton(text="🛠 حالت تعمیرات", callback_data="adm:maintenance"), InlineKeyboardButton(text="💾 بکاپ", callback_data="adm:backup")],
+        [InlineKeyboardButton(text="⚙️ تنظیمات", callback_data="adm:settings"), InlineKeyboardButton(text="🛠 حالت تعمیرات", callback_data="adm:maintenance")],
+        [InlineKeyboardButton(text="💾 بکاپ", callback_data="adm:backup")],
     ])
 
 
@@ -197,14 +196,6 @@ def reseller_user_actions_keyboard(reseller_id: int, created_user_id: int, page:
     ])
 
 
-def renewal_settings_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ انتخاب تمدید افزایشی", callback_data="adm:renewal:set:additive")],
-        [InlineKeyboardButton(text="🔄 انتخاب تمدید با ریست و جایگزینی", callback_data="adm:renewal:set:replace")],
-        [InlineKeyboardButton(text="بازگشت", callback_data="adm:panel")],
-    ])
-
-
 def report_scope_keyboard(resellers=None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 همه ریسلرها", callback_data="adm:rpt:s:all")],
@@ -283,13 +274,6 @@ def group_access_keyboard(names: list[str], selected: list[str], mode: str, rese
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def subscription_settings_keyboard(mono_enabled: bool) -> InlineKeyboardMarkup:
-    toggle = "⬜ خاموش کردن Mono" if mono_enabled else "✅ روشن کردن Mono"
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=toggle, callback_data="adm:subset:toggle")],
-        [InlineKeyboardButton(text="⬅️ پنل مدیریت", callback_data="adm:panel")],
-    ])
-
 
 def limits_keyboard(scope: str, has_custom: bool = False) -> InlineKeyboardMarkup:
     """scope: 'g' = global, or a reseller id."""
@@ -331,3 +315,30 @@ def backup_bot_keyboard(has_token: bool) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(text="🗑 حذف توکن (برگشت به همین بات)", callback_data="adm:backup:bot:clear")])
     rows.append([InlineKeyboardButton(text="⬅️ برگشت", callback_data="adm:backup")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def settings_keyboard(mode_text: str, mono_enabled: bool, on_hold_days: int | None) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=f"♻️ روش تمدید: {mode_text} (تغییر)", callback_data="adm:set:renew")],
+        [InlineKeyboardButton(text=f"🔗 لینک Mono: {'روشن' if mono_enabled else 'خاموش'} (تغییر)", callback_data="adm:set:mono")],
+        [InlineKeyboardButton(text=f"⏳ on_hold days: {on_hold_days if on_hold_days else 'تنظیم نشده'} (تغییر)", callback_data="adm:set:hold")],
+    ]
+    if on_hold_days:
+        rows.append([InlineKeyboardButton(text="🚫 حذف on_hold days", callback_data="adm:set:hold:clear")])
+    rows.append([InlineKeyboardButton(text="🔄 Sync users owners", callback_data="adm:set:sync")])
+    rows.append([InlineKeyboardButton(text="⬅️ پنل مدیریت", callback_data="adm:panel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def settings_hold_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚫 بدون محدودیت (همیشه on_hold)", callback_data="adm:set:hold:clear")],
+        [InlineKeyboardButton(text="⬅️ برگشت", callback_data="adm:settings"), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")],
+    ])
+
+
+def settings_sync_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ شروع Sync", callback_data="adm:set:sync:go")],
+        [InlineKeyboardButton(text="⬅️ برگشت", callback_data="adm:settings")],
+    ])

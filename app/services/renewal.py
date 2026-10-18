@@ -53,3 +53,10 @@ def calculate_renewal(user: dict[str, Any], gb: int, days: int, mode: RenewalMod
         resulting_expire = max(previous_expire, now) + entered_seconds
         reset_required = False
     return RenewalCalculation(parsed_mode, previous_data_limit, previous_expire, resulting_data_limit, resulting_expire, reset_required)
+
+
+def renewal_wording(mode: RenewalMode | str | None) -> dict[str, str]:
+    """Texts that depend on the renewal mode: adding to the old plan, or replacing it with a new one."""
+    if normalize_renewal_mode(mode.value if isinstance(mode, RenewalMode) else mode) is RenewalMode.replace:
+        return {"gb_prompt": "حجم جدید را به گیگابایت وارد کنید", "days_prompt": "تعداد روز را وارد کنید", "gb_label": "حجم جدید", "days_label": "تعداد روز"}
+    return {"gb_prompt": "حجم اضافه را به گیگابایت وارد کنید", "days_prompt": "روزهای اضافه را وارد کنید", "gb_label": "حجم اضافه", "days_label": "روزهای اضافه"}

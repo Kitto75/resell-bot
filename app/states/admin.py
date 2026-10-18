@@ -98,3 +98,7 @@ class DisableReseller(StatesGroup):
 
 class ReportScope(StatesGroup):
     reseller = State()
+
+
+class SettingsEdit(StatesGroup):
+    on_hold_days = State()

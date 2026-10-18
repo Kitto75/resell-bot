@@ -14,7 +14,8 @@ from app.keyboards.reseller import created_user_actions, dashboard, my_users_pag
 from app.services.billing import BYTES_PER_GB, BillingService
 from app.services.limits import effective_limits
 from app.services.marzban import MarzbanClient, MarzbanError, create_payload_summary, extract_last_user_agent, on_hold_expire_duration, ownership_note, user_belongs_to_reseller
-from app.services.renewal import RenewalMode, calculate_renewal, renewal_mode_confirmation_text
+from app.services.bot_settings import get_on_hold_days
+from app.services.renewal import RenewalMode, calculate_renewal, renewal_mode_confirmation_text, renewal_wording
 from app.services.delivery import accounts_list_text, send_account_message
 from app.services.reports import operation_report, recharge_request_text
 from app.services.user_info import reseller_activity_lines
@@ -31,6 +32,11 @@ USERNAME_EXISTS_NOT_YOURS = "این نام کاربری از قبل وجود د�
 MARZBAN_CREATE_FAILED = "ساخت اکانت در پنل ناموفق بود. لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید."
 POST_CREATE_VERIFY_DELAY_SECONDS = 3
 MY_USERS_PAGE_SIZE = 10
+
+async def current_renewal_wording() -> dict[str, str]:
+    async with SessionLocal() as session:
+        return renewal_wording(await SettingsRepository(session).get_renewal_mode())
+
 
 async def reseller_limits(reseller_id: int):
     async with SessionLocal() as session:
@@ -309,6 +315,7 @@ async def create_confirm(cb: CallbackQuery, state: FSMContext, reseller: Reselle
             cost = BillingService(session).calculate_cost(gb, db_reseller.price_per_gb)
             if db_reseller.balance < cost: await cb.message.answer("موجودی کافی نیست."); await state.clear(); await cb.answer(); return
             payload = {"username": username, "status": "on_hold", "data_limit": gb * BYTES_PER_GB, "on_hold_expire_duration": on_hold_expire_duration(days), "validity_days": days, "note": ownership_note(db_reseller.display_name)}
+            if (hold_days := await get_on_hold_days(session)): payload["on_hold_days"] = hold_days  # admin setting: leave on_hold after N days
             marzban = client()
             allowed_tags = await InboundRepository(session).allowed_tags(db_reseller.id)
             try:
@@ -411,7 +418,8 @@ async def renew_username(message: Message, state: FSMContext, reseller: Reseller
 
 @router.callback_query(RenewUser.confirm_user, F.data == "res:renew:user_confirm")
 async def renew_confirm_user(cb: CallbackQuery, state: FSMContext, reseller: Reseller) -> None:
-    await state.set_state(RenewUser.gb); await cb.message.answer(f"حجم اضافه را به گیگابایت وارد کنید{(await reseller_limits(reseller.id)).gb_hint()}:", reply_markup=back_cancel()); await cb.answer()
+    wording = await current_renewal_wording()
+    await state.set_state(RenewUser.gb); await cb.message.answer(f"{wording['gb_prompt']}{(await reseller_limits(reseller.id)).gb_hint()}:", reply_markup=back_cancel()); await cb.answer()
 
 @router.message(RenewUser.gb)
 async def renew_gb(message: Message, state: FSMContext, reseller: Reseller) -> None:
@@ -420,7 +428,7 @@ async def renew_gb(message: Message, state: FSMContext, reseller: Reseller) -> N
     if gb <= 0: await message.answer("حجم باید بیشتر از صفر باشد."); return
     limits = await reseller_limits(reseller.id)
     if (error := limits.check_gb(gb)): await message.answer(error); return
-    await state.update_data(gb=gb); await state.set_state(RenewUser.days); await message.answer(f"روزهای اضافه را وارد کنید{limits.days_hint()}:", reply_markup=back_cancel())
+    await state.update_data(gb=gb); await state.set_state(RenewUser.days); await message.answer(f"{(await current_renewal_wording())['days_prompt']}{limits.days_hint()}:", reply_markup=back_cancel())
 
 @router.message(RenewUser.days)
 async def renew_days(message: Message, state: FSMContext, reseller: Reseller) -> None:
@@ -431,7 +439,8 @@ async def renew_days(message: Message, state: FSMContext, reseller: Reseller) ->
     data = await state.update_data(days=days); cost = Decimal(data["gb"]) * reseller.price_per_gb
     async with SessionLocal() as session:
         mode = await SettingsRepository(session).get_renewal_mode()
-    await state.set_state(RenewUser.confirm); await message.answer(f"خلاصه تمدید\nنام کاربری: {data['username']}\nحجم واردشده: {data['gb']} گیگابایت\nزمان واردشده: {days} روز\nهزینه: {format_toman(cost)}\n\n{renewal_mode_confirmation_text(mode)}\n\nآیا تمدید تایید شود؟", reply_markup=reseller_confirm("res:renew:confirm", "res:renew", "✅ تایید تمدید"))
+    wording = renewal_wording(mode)
+    await state.set_state(RenewUser.confirm); await message.answer(f"خلاصه تمدید\nنام کاربری: {data['username']}\n{wording['gb_label']}: {data['gb']} گیگابایت\n{wording['days_label']}: {days} روز\nهزینه: {format_toman(cost)}\n\n{renewal_mode_confirmation_text(mode)}\n\nآیا تمدید تایید شود؟", reply_markup=reseller_confirm("res:renew:confirm", "res:renew", "✅ تایید تمدید"))
 
 @router.callback_query(RenewUser.confirm, F.data == "res:renew:confirm")
 async def renew_confirm(cb: CallbackQuery, state: FSMContext, reseller: Reseller) -> None:

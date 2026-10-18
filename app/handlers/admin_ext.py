@@ -16,14 +16,19 @@ from app.database.models import ResellerStatus
 from app.database.repositories import ResellerRepository, SettingsRepository
 from app.database.session import SessionLocal
 from app.handlers.admin import answer_card, build_reseller_list, client, edit_or_answer
-from app.keyboards.admin import (admin_back_cancel, backup_bot_keyboard, disable_prompt_keyboard, limit_value_keyboard, limits_keyboard, panel,
+from app.keyboards.admin import (admin_back_cancel, backup_bot_keyboard, settings_hold_keyboard, settings_keyboard, settings_sync_keyboard, disable_prompt_keyboard, limit_value_keyboard, limits_keyboard, panel,
                                  report_period_keyboard, reseller_matches_keyboard)
 from app.services import limits as lim
+from app.services.bot_settings import MAX_ON_HOLD_DAYS, get_on_hold_days, set_on_hold_days
+from app.services.delivery import SUB_MONO_KEY
+from app.services.marzban import MarzbanError
+from app.services.owners_sync import report_text, sync_owners
+from app.services.renewal import RenewalMode, normalize_renewal_mode, renewal_mode_fa
 from app.services.backup import (get_backup_bot_token, send_backup_bot_test, set_backup_bot_token, validate_backup_bot_token)
 from app.services.datetime import jalali_filename_datetime
 from app.services.pdf_report import PdfFontError, build_report_pdf, collect_snapshot_data
 from app.services.tg_resolve import find_resellers
-from app.states.admin import BackupSettings, DisableReseller, EditReseller, LimitEdit, ReportScope
+from app.states.admin import BackupSettings, DisableReseller, EditReseller, LimitEdit, ReportScope, SettingsEdit
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -307,3 +312,134 @@ async def backup_bot_clear(cb: CallbackQuery, is_admin: bool) -> None:
     if not is_admin: return
     await set_backup_bot_token(None)
     await cb.answer("به بات اصلی برگشت."); await _backup_bot_screen(cb.message, cb, note="🗑 توکن حذف شد.")
+
+
+# ======================================================================= ⚙️ settings (one screen for everything)
+_SYNC_RUNNING = False
+
+
+async def _load_settings() -> tuple[str, bool, int | None]:
+    async with SessionLocal() as session:
+        repo = SettingsRepository(session)
+        return await repo.get_renewal_mode(), await repo.get_bool(SUB_MONO_KEY, True), await get_on_hold_days(session)
+
+
+def _settings_text(mode: str, mono: bool, hold_days: int | None) -> str:
+    mode_help = ("حجم و روزِ واردشده به مقدار فعلی اکانت اضافه می‌شود." if normalize_renewal_mode(mode) is RenewalMode.additive
+                 else "مصرف صفر می‌شود و حجم و روزِ واردشده جایگزین دوره‌ی قبلی می‌شود.")
+    return "\n".join([
+        "⚙️ تنظیمات", "━━━━━━━━━━━━━━",
+        f"♻️ روش تمدید: {renewal_mode_fa(mode)}", f"   {mode_help}", "",
+        f"🔗 لینک سابسکریپشن به‌صورت Mono: {'✅ روشن' if mono else '⬜ خاموش'}",
+        "   روشن: لینک داخل کادر mono می‌آید و با یک لمس کپی می‌شود.", "",
+        f"⏳ on_hold days: {f'{hold_days} روز' if hold_days else 'تنظیم نشده'}",
+        "   اکانت‌های جدید بعد از این تعداد روز، حتی اگر کاربر وصل نشده باشد، از حالت on_hold خارج می‌شوند.",
+        "   تنظیم‌نشده یعنی اکانت‌ها تا اولین اتصال کاربر on_hold می‌مانند.", "",
+        "🔄 Sync users owners",
+        "   کاربران پنل را بر اساس note («belongs to نام-ریسلر») به لیست یوزرهای هر ریسلر اضافه می‌کند.",
+    ])
+
+
+async def _show_settings(message: Message, cb: CallbackQuery | None = None, note: str | None = None) -> None:
+    mode, mono, hold = await _load_settings()
+    text = (f"{note}\n\n" if note else "") + _settings_text(mode, mono, hold)
+    markup = settings_keyboard(renewal_mode_fa(mode), mono, hold)
+    if cb is not None: await edit_or_answer(cb, text, markup)
+    else: await message.answer(text, reply_markup=markup)
+
+
+@router.callback_query(F.data == "adm:settings")
+async def settings_open(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    await state.clear(); await _show_settings(cb.message, cb); await cb.answer()
+
+
+@router.callback_query(F.data == "adm:set:renew")
+async def settings_toggle_renewal(cb: CallbackQuery, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    async with SessionLocal() as session, session.begin():
+        repo = SettingsRepository(session)
+        new_mode = RenewalMode.replace if normalize_renewal_mode(await repo.get_renewal_mode()) is RenewalMode.additive else RenewalMode.additive
+        await repo.set_renewal_mode(new_mode.value)
+    logger.info("Admin changed renewal mode admin_id=%s mode=%s", cb.from_user.id, new_mode.value)
+    await _show_settings(cb.message, cb); await cb.answer(f"روش تمدید: {renewal_mode_fa(new_mode)}")
+
+
+@router.callback_query(F.data == "adm:set:mono")
+async def settings_toggle_mono(cb: CallbackQuery, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    async with SessionLocal() as session, session.begin():
+        repo = SettingsRepository(session)
+        enabled = not await repo.get_bool(SUB_MONO_KEY, True)
+        await repo.set_bool(SUB_MONO_KEY, enabled)
+    logger.info("Admin changed subscription link mono format admin_id=%s mono=%s", cb.from_user.id, enabled)
+    await _show_settings(cb.message, cb); await cb.answer("✅ Mono روشن شد." if enabled else "✅ Mono خاموش شد.")
+
+
+@router.callback_query(F.data == "adm:set:hold")
+async def settings_hold_start(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    await state.set_state(SettingsEdit.on_hold_days)
+    await cb.message.answer("⏳ on_hold days\nتعداد روز را به‌صورت عدد بفرستید (مثلاً 3).\nاکانت‌های جدید بعد از این تعداد روز، حتی اگر کاربر وصل نشده باشد، از on_hold خارج می‌شوند.\nبرای برگرداندن به حالت «همیشه on_hold» دکمه‌ی زیر را بزنید.", reply_markup=settings_hold_keyboard()); await cb.answer()
+
+
+@router.message(SettingsEdit.on_hold_days, F.text, ~F.text.startswith("/"))
+async def settings_hold_value(message: Message, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    days = _parse_int(message.text)
+    if days is None or not 1 <= days <= MAX_ON_HOLD_DAYS:
+        await message.answer(f"یک عدد صحیح بین 1 تا {MAX_ON_HOLD_DAYS} بفرستید، یا «بدون محدودیت» را بزنید."); return
+    async with SessionLocal() as session, session.begin(): await set_on_hold_days(session, days)
+    await state.clear()
+    logger.info("Admin set on_hold days admin_id=%s days=%s", message.from_user.id, days)
+    await _show_settings(message, note=f"✅ on_hold days روی {days} روز تنظیم شد؛ از اکانت بعدی اعمال می‌شود.")
+
+
+@router.callback_query(F.data == "adm:set:hold:clear")
+async def settings_hold_clear(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    async with SessionLocal() as session, session.begin(): await set_on_hold_days(session, None)
+    await state.clear(); logger.info("Admin cleared on_hold days admin_id=%s", cb.from_user.id)
+    await cb.answer("on_hold days برداشته شد."); await _show_settings(cb.message, note="✅ on_hold days برداشته شد؛ اکانت‌های جدید تا اولین اتصال on_hold می‌مانند.")
+
+
+@router.callback_query(F.data == "adm:set:sync")
+async def settings_sync_confirm(cb: CallbackQuery, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    await edit_or_answer(cb, "🔄 Sync users owners\n━━━━━━━━━━━━━━\n"
+                         "همه‌ی کاربران پنل خوانده می‌شوند و هر کاربری که note او «belongs to نام-ریسلر» باشد، به لیست یوزرهای همان ریسلر اضافه (یا مالکش اصلاح) می‌شود.\n\n"
+                         "• چیزی در پنل تغییر نمی‌کند و هیچ موجودی‌ای کم یا زیاد نمی‌شود.\n• هیچ رکوردی حذف نمی‌شود.\n• برای پنل‌های بزرگ ممکن است چند ثانیه طول بکشد.",
+                         settings_sync_keyboard()); await cb.answer()
+
+
+@router.callback_query(F.data == "adm:set:sync:go")
+async def settings_sync_run(cb: CallbackQuery, is_admin: bool) -> None:
+    global _SYNC_RUNNING
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    if _SYNC_RUNNING:
+        await cb.answer("Sync همین حالا در حال انجام است.", show_alert=True); return
+    _SYNC_RUNNING = True
+    try:
+        await cb.answer("⏳ در حال خواندن کاربران پنل...")
+        progress = await cb.message.answer("⏳ در حال خواندن کاربران پنل و تطبیق با note ها...")
+        try:
+            users = await client().list_all_users()
+            async with SessionLocal() as session, session.begin(): result = await sync_owners(session, users)
+        except MarzbanError:
+            logger.exception("Sync users owners failed while reading the panel")
+            await progress.edit_text("❌ ارتباط با پنل برقرار نشد. چیزی تغییر نکرد؛ کمی بعد دوباره تلاش کنید.", reply_markup=settings_sync_keyboard()); return
+        logger.info("Sync users owners admin_id=%s scanned=%s added=%s moved=%s unknown=%s", cb.from_user.id, result.scanned, result.added_total, result.moved_total, sum(result.unknown_owners.values()))
+        await progress.edit_text(report_text(result), reply_markup=settings_keyboard_after_sync())
+    finally:
+        _SYNC_RUNNING = False
+
+
+def settings_keyboard_after_sync() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⚙️ تنظیمات", callback_data="adm:settings"), InlineKeyboardButton(text="🏠 پنل مدیریت", callback_data="adm:panel")]])
