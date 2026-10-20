@@ -76,10 +76,10 @@ def _sum(values) -> Decimal:
     return sum((Decimal(v) for v in values), Decimal("0"))
 
 
-def _capped(rows: list[list[str]]) -> tuple[list[list[str]], str]:
-    if len(rows) <= MAX_ROWS_PER_SECTION:
+def _capped(rows: list[list[str]], limit: int = MAX_ROWS_PER_SECTION) -> tuple[list[list[str]], str]:
+    if len(rows) <= limit:
         return rows, ""
-    return rows[:MAX_ROWS_PER_SECTION], f"فقط {MAX_ROWS_PER_SECTION} ردیف اول (جدیدترین‌ها) از {len(rows)} ردیف نمایش داده شده است."
+    return rows[:limit], f"فقط {limit} ردیف اول از {len(rows)} ردیف نمایش داده شده است."
 
 
 async def collect_report_data(session: AsyncSession, reseller_id: int | None, period: str, tz_name: str) -> ReportData:
@@ -177,6 +177,67 @@ async def collect_snapshot_data(session, client, tz_name: str) -> ReportData:
     )
     access = Section("دسترسی گروه‌ها، محدودیت‌ها و آیدی تلگرام", ["ریسلر", "گروه‌های مجاز", "حداکثر روز", "حداقل حجم", "حداکثر حجم", "آیدی تلگرام"], access_rows)
     return ReportData("همه ریسلرها", "وضعیت لحظه‌ای", jalali_datetime_text(datetime.now(timezone.utc), tz_name), summary, [access], title="گزارش وضعیت ریسلرها")
+
+
+USERS_MAX_ROWS = 5000
+_STATUS_ORDER = ["active", "on_hold", "limited", "expired", "disabled"]
+_GB = 1024 ** 3
+
+
+def _gb_text(value: int) -> str:
+    return f"{value / _GB:.2f} GB"
+
+
+def _remaining_time_text(user: dict, now: datetime) -> str:
+    status = str(getattr(user.get("status"), "value", user.get("status")))
+    if status == "on_hold":
+        duration = int(user.get("on_hold_expire_duration") or 0)
+        return f"{duration // 86400} روز (پس از اتصال)" if duration else "پس از اتصال"
+    expire = int(user.get("expire") or 0)
+    if expire <= 0: return "نامحدود"
+    seconds = expire - int(now.timestamp())
+    if seconds <= 0: return "منقضی"
+    if seconds >= 86400: return f"{seconds // 86400} روز"
+    if seconds >= 3600: return f"{seconds // 3600} ساعت"
+    return f"{max(1, seconds // 60)} دقیقه"
+
+
+async def collect_reseller_users_data(session, client, reseller_id: int, tz_name: str, now: datetime | None = None) -> ReportData:
+    """Right-now snapshot of every account of one reseller (volume, remaining time, status) read from the panel.
+    Raises MarzbanError if the panel can't be read."""
+    now = now or datetime.now(timezone.utc)
+    reseller = await ResellerRepository(session).get(reseller_id)
+    name = reseller.display_name if reseller else str(reseller_id)
+    usernames = list((await session.scalars(select(CreatedUser.username).where(CreatedUser.reseller_id == reseller_id).order_by(CreatedUser.username))).all())
+    panel_users = {str(u.get("username")): u for u in (await client.list_users_by_usernames(usernames) if usernames else [])}
+    found = [panel_users[n] for n in usernames if n in panel_users]
+    missing = [n for n in usernames if n not in panel_users]
+    found.sort(key=lambda u: (_STATUS_ORDER.index(st) if (st := str(getattr(u.get("status"), "value", u.get("status")))) in _STATUS_ORDER else len(_STATUS_ORDER), str(u.get("username"))))
+
+    counts: dict[str, int] = {}
+    total_limit = total_used = 0
+    rows = []
+    for u in found:
+        status = str(getattr(u.get("status"), "value", u.get("status")))
+        counts[status] = counts.get(status, 0) + 1
+        limit, used = int(u.get("data_limit") or 0), int(u.get("used_traffic") or 0)
+        total_limit += limit; total_used += used
+        expire = int(u.get("expire") or 0)
+        rows.append([str(u.get("username")), status_fa(status), _gb_text(used), _gb_text(limit) if limit > 0 else "نامحدود",
+                     _gb_text(max(limit - used, 0)) if limit > 0 else "نامحدود", _remaining_time_text(u, now),
+                     jalali_datetime_text(datetime.fromtimestamp(expire, timezone.utc), tz_name)[:10] if expire > 0 else "-"])
+    summary_rows = [["نام ریسلر", name], ["تعداد کل کاربران", str(len(usernames))]]
+    summary_rows += [[status_fa(st), str(counts[st])] for st in _STATUS_ORDER if counts.get(st)]
+    summary_rows += [[st, str(n)] for st, n in counts.items() if st not in _STATUS_ORDER]
+    if missing: summary_rows.append(["در پنل پیدا نشد", str(len(missing))])
+    summary_rows += [["جمع حجم کل (بدون نامحدودها)", _gb_text(total_limit)], ["جمع حجم مصرفی", _gb_text(total_used)]]
+    summary = Section("خلاصه وضعیت کاربران", ["مورد", "مقدار"], summary_rows)
+    table_rows, note = _capped(rows, USERS_MAX_ROWS)
+    sections = [Section("فهرست کاربران", ["نام کاربری", "وضعیت", "حجم مصرفی", "حجم کل", "حجم باقی‌مانده", "زمان باقی‌مانده", "تاریخ انقضا"], table_rows, f"تعداد: {len(rows)}", note)]
+    if missing:
+        miss_rows, miss_note = _capped([[n] for n in missing], 300)
+        sections.append(Section("در پنل پیدا نشد (احتمالاً حذف شده‌اند)", ["نام کاربری"], miss_rows, note=miss_note))
+    return ReportData(name, "وضعیت لحظه‌ای", jalali_datetime_text(now, tz_name), summary, sections, title=f"گزارش کاربران ریسلر {name}")
 
 
 # ---------------------------------------------------------------- rendering

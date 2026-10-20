@@ -5,6 +5,7 @@ class AddReseller(StatesGroup):
     balance = State()
     price = State()
     display_name = State()
+    groups = State()
     confirm = State()
 
 class EditReseller(StatesGroup):
@@ -102,3 +103,14 @@ class ReportScope(StatesGroup):
 
 class SettingsEdit(StatesGroup):
     on_hold_days = State()
+    global_price = State()
+    price_confirm = State()
+
+
+class GlobalGroups(StatesGroup):
+    edit = State()
+    confirm = State()
+
+
+class StatsRange(StatesGroup):
+    custom = State()

@@ -4,6 +4,7 @@ Included BEFORE admin.router so that /reseller can interrupt any running flow (l
 import asyncio
 import logging
 import tempfile
+from decimal import Decimal
 from pathlib import Path
 
 from aiogram import F, Router
@@ -12,13 +13,17 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.config import get_settings
-from app.database.models import ResellerStatus
-from app.database.repositories import ResellerRepository, SettingsRepository
+from sqlalchemy import update
+
+from app.database.models import Reseller, ResellerStatus
+from app.database.repositories import InboundRepository, ResellerRepository, SettingsRepository
 from app.database.session import SessionLocal
-from app.handlers.admin import answer_card, build_reseller_list, client, edit_or_answer
-from app.keyboards.admin import (admin_back_cancel, backup_bot_keyboard, settings_hold_keyboard, settings_keyboard, settings_sync_keyboard, disable_prompt_keyboard, limit_value_keyboard, limits_keyboard, panel,
+from app.handlers.admin import answer_card, build_reseller_list, client, edit_or_answer, money
+from app.keyboards.admin import (admin_back_cancel, backup_bot_keyboard, group_picker_keyboard, sales_period_keyboard, sales_result_keyboard, settings_confirm_keyboard, stats_menu_keyboard, settings_hold_keyboard, settings_keyboard, settings_sync_keyboard, disable_prompt_keyboard, limit_value_keyboard, limits_keyboard, panel,
                                  report_period_keyboard, reseller_matches_keyboard)
+from app.services import group_picker as gp
 from app.services import limits as lim
+from app.services.sales_stats import CUSTOM_RANGE_HELP, collect_sales_stats, format_sales_text, parse_custom_range, window_for
 from app.services.bot_settings import MAX_ON_HOLD_DAYS, get_on_hold_days, set_on_hold_days
 from app.services.delivery import SUB_MONO_KEY
 from app.services.marzban import MarzbanError
@@ -26,9 +31,11 @@ from app.services.owners_sync import report_text, sync_owners
 from app.services.renewal import RenewalMode, normalize_renewal_mode, renewal_mode_fa
 from app.services.backup import (get_backup_bot_token, send_backup_bot_test, set_backup_bot_token, validate_backup_bot_token)
 from app.services.datetime import jalali_filename_datetime
-from app.services.pdf_report import PdfFontError, build_report_pdf, collect_snapshot_data
+from app.services.pdf_report import PdfFontError, build_report_pdf, collect_reseller_users_data, collect_snapshot_data
+from app.services.reseller_view import group_picker_text, group_summary
 from app.services.tg_resolve import find_resellers
-from app.states.admin import BackupSettings, DisableReseller, EditReseller, LimitEdit, ReportScope, SettingsEdit
+from app.utils.formatting import format_toman
+from app.states.admin import BackupSettings, DisableReseller, GlobalGroups, LimitEdit, ReportScope, SettingsEdit, StatsRange
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -174,13 +181,6 @@ async def _disable(message: Message, state: FSMContext, reseller_id: int, text: 
 async def disable_start(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
     if not is_admin: return
     await cb.answer(); await _prompt_disable(cb.message, state, int(cb.data.split(":")[3]))
-
-
-@router.callback_query(EditReseller.value, F.data == "adm:editstatus:disabled")
-async def disable_from_edit(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
-    if not is_admin: return
-    data = await state.get_data()
-    await cb.answer(); await _prompt_disable(cb.message, state, int(data["reseller_id"]))
 
 
 @router.callback_query(F.data.regexp(r"^adm:rc:dis:\d+$"))
@@ -335,6 +335,10 @@ def _settings_text(mode: str, mono: bool, hold_days: int | None) -> str:
         f"⏳ on_hold days: {f'{hold_days} روز' if hold_days else 'تنظیم نشده'}",
         "   اکانت‌های جدید بعد از این تعداد روز، حتی اگر کاربر وصل نشده باشد، از حالت on_hold خارج می‌شوند.",
         "   تنظیم‌نشده یعنی اکانت‌ها تا اولین اتصال کاربر on_hold می‌مانند.", "",
+        "💲 قیمت همگانی",
+        "   قیمت هر گیگابایت را یک‌جا و فوراً برای همه‌ی ریسلرها اعمال می‌کند.", "",
+        "🌐 گروه‌های همگانی",
+        "   دسترسی گروه‌ها را یک‌جا و فوراً برای همه‌ی ریسلرها اعمال می‌کند.", "",
         "🔄 Sync users owners",
         "   کاربران پنل را بر اساس note («belongs to نام-ریسلر») به لیست یوزرهای هر ریسلر اضافه می‌کند.",
     ])
@@ -443,3 +447,192 @@ async def settings_sync_run(cb: CallbackQuery, is_admin: bool) -> None:
 
 def settings_keyboard_after_sync() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⚙️ تنظیمات", callback_data="adm:settings"), InlineKeyboardButton(text="🏠 پنل مدیریت", callback_data="adm:panel")]])
+
+
+# ======================================================================= 💲 global price (applied to every reseller right now)
+MAX_PRICE = 10 ** 9
+
+
+async def _price_overview() -> tuple[int, str]:
+    async with SessionLocal() as session: resellers = await ResellerRepository(session).list(include_archived=True)
+    if not resellers: return 0, ""
+    prices = [r.price_per_gb for r in resellers]
+    low, high = min(prices), max(prices)
+    return len(resellers), (f"قیمت فعلی ریسلرها: {format_toman(low)}" if low == high else f"قیمت فعلی ریسلرها: از {format_toman(low)} تا {format_toman(high)}")
+
+
+@router.callback_query(F.data == "adm:set:price")
+async def price_start(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    count, overview = await _price_overview()
+    if not count:
+        await cb.answer("هنوز ریسلری ثبت نشده است.", show_alert=True); return
+    await state.set_state(SettingsEdit.global_price)
+    await cb.message.answer(f"💲 قیمت همگانی\nقیمت جدید هر گیگابایت را به تومان بفرستید؛ بعد از تأیید، فوراً برای همه‌ی {count} ریسلر اعمال می‌شود.\n{overview}", reply_markup=admin_back_cancel("adm:settings")); await cb.answer()
+
+
+@router.message(SettingsEdit.global_price, F.text, ~F.text.startswith("/"))
+async def price_value(message: Message, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    value = money((message.text or "").translate(_DIGITS))
+    if value is None or not 0 < value <= MAX_PRICE:
+        await message.answer("قیمت باید یک عدد بیشتر از صفر باشد (مثل 15000)."); return
+    count, overview = await _price_overview()
+    await state.update_data(price=str(value)); await state.set_state(SettingsEdit.price_confirm)
+    await message.answer(
+        f"💲 تأیید قیمت همگانی\n━━━━━━━━━━━━━━\nقیمت هر گیگابایت برای {count} ریسلر (فعال، غیرفعال و بایگانی‌شده) روی {format_toman(value)} تنظیم می‌شود.\n{overview}\n\n"
+        "• فقط روی ساخت و تمدیدهای بعدی اثر دارد؛ اکانت‌های ساخته‌شده و تراکنش‌های قبلی تغییر نمی‌کنند.\n• بعد از تأیید فوراً اعمال می‌شود.",
+        reply_markup=settings_confirm_keyboard("adm:set:price:go"))
+
+
+@router.callback_query(SettingsEdit.price_confirm, F.data == "adm:set:price:go")
+async def price_apply(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    data = await state.get_data(); price = Decimal(data["price"])
+    async with SessionLocal() as session, session.begin():
+        result = await session.execute(update(Reseller).values(price_per_gb=price))
+        count = result.rowcount
+    await state.clear()
+    logger.warning("Admin applied a global price admin_id=%s price=%s resellers=%s", cb.from_user.id, price, count)
+    await cb.answer("اعمال شد.")
+    await _show_settings(cb.message, note=f"✅ قیمت هر گیگابایت برای {count} ریسلر روی {format_toman(price)} تنظیم شد.")
+
+
+# ======================================================================= 🌐 global groups (applied to every reseller right now)
+def _gg_view(data: dict):
+    picker = data["gp"]
+    text = group_picker_text("🌐 گروه‌های همگانی", f"کدام گروه‌ها روی همه‌ی ریسلرها ({data['count']} ریسلر) اعمال شود؟", picker, note="⚠️ دسترسی فعلی هر ریسلر با این انتخاب جایگزین می‌شود.")
+    return text, group_picker_keyboard("adm:gg", picker["names"], picker["selected"], picker["mode"], "✅ ادامه", "adm:settings")
+
+
+@router.callback_query(F.data == "adm:set:groups")
+async def global_groups_start(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    async with SessionLocal() as session: count = len(await ResellerRepository(session).list(include_archived=True))
+    if not count:
+        await cb.answer("هنوز ریسلری ثبت نشده است.", show_alert=True); return
+    try: picker = await gp.load_group_picker(client())
+    except MarzbanError:
+        logger.exception("Could not load panel groups for the global assignment")
+        await cb.message.answer("❌ دریافت گروه‌ها از پنل ممکن نشد. اتصال پنل را بررسی کنید."); await cb.answer(); return
+    if picker is None:
+        await cb.message.answer("در پنل هنوز گروه فعالی وجود ندارد. اول در پنل یک گروه بسازید."); await cb.answer(); return
+    await state.set_state(GlobalGroups.edit); await state.set_data({"gp": picker, "count": count})
+    text, markup = _gg_view(await state.get_data()); await edit_or_answer(cb, text, markup); await cb.answer()
+
+
+@router.callback_query(GlobalGroups.edit, F.data == "adm:gg:all")
+async def global_groups_all(cb: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data(); data = await state.update_data(gp=gp.set_all(data["gp"]))
+    text, markup = _gg_view(data); await edit_or_answer(cb, text, markup); await cb.answer("همه گروه‌ها")
+
+
+@router.callback_query(GlobalGroups.edit, F.data.regexp(r"^adm:gg:t:\d+$"))
+async def global_groups_toggle(cb: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data(); picker = gp.toggle(data["gp"], int(cb.data.rsplit(":", 1)[1]))
+    if picker is None:
+        await cb.answer("این گزینه دیگر معتبر نیست.", show_alert=True); return
+    data = await state.update_data(gp=picker); text, markup = _gg_view(data); await edit_or_answer(cb, text, markup); await cb.answer()
+
+
+@router.callback_query(GlobalGroups.edit, F.data == "adm:gg:done")
+async def global_groups_done(cb: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    if (error := gp.validate(data["gp"])):
+        await cb.answer(error, show_alert=True); return
+    tags = gp.result_tags(data["gp"]); await state.update_data(tags=tags); await state.set_state(GlobalGroups.confirm)
+    await edit_or_answer(cb, f"🌐 تأیید گروه‌های همگانی\n━━━━━━━━━━━━━━\nدسترسی گروه‌ها برای {data['count']} ریسلر (فعال، غیرفعال و بایگانی‌شده) روی «{group_summary(tags, 8)}» تنظیم می‌شود و دسترسی قبلی هر کدام جایگزین می‌شود.\n\n• فقط روی ساخت اکانت‌های بعدی اثر دارد؛ اکانت‌های ساخته‌شده تغییری نمی‌کنند.\n• بعد از تأیید فوراً اعمال می‌شود.",
+                         settings_confirm_keyboard("adm:gg:go", "adm:set:groups")); await cb.answer()
+
+
+@router.callback_query(GlobalGroups.confirm, F.data == "adm:gg:go")
+async def global_groups_apply(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    tags = list((await state.get_data())["tags"])
+    async with SessionLocal() as session, session.begin():
+        resellers = await ResellerRepository(session).list(include_archived=True)
+        inbound_repo = InboundRepository(session)
+        for reseller in resellers: await inbound_repo.set_allowed_tags(reseller.id, tags)
+    await state.clear()
+    logger.warning("Admin applied global group access admin_id=%s groups=%s resellers=%s", cb.from_user.id, tags or "ALL", len(resellers))
+    await cb.answer("اعمال شد.")
+    await _show_settings(cb.message, note=f"✅ دسترسی گروه‌ها برای {len(resellers)} ریسلر روی «{group_summary(tags, 8)}» تنظیم شد.")
+
+
+@router.callback_query(F.data.startswith("adm:gg:"))
+async def global_groups_expired(cb: CallbackQuery, is_admin: bool) -> None:
+    if is_admin: await cb.answer("این صفحه منقضی شده است. دوباره از «تنظیمات ← گروه‌های همگانی» شروع کنید.", show_alert=True)
+
+
+# ======================================================================= 📊 stats menu, 📈 sales & charge statistics
+@router.callback_query(F.data == "adm:stats")
+async def stats_menu(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    await state.clear(); await edit_or_answer(cb, "📊 گزارش آمار\nنوع گزارش را انتخاب کنید.", stats_menu_keyboard()); await cb.answer()
+
+
+@router.callback_query(F.data == "adm:sales")
+async def sales_menu(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    await state.clear(); await edit_or_answer(cb, "📈 آمار شارژ و فروش\nبازه‌ی زمانی را انتخاب کنید.", sales_period_keyboard()); await cb.answer()
+
+
+async def _sales_text(start, end, label: str) -> str:
+    async with SessionLocal() as session: stats = await collect_sales_stats(session, start, end)
+    return format_sales_text(stats, label)
+
+
+@router.callback_query(F.data.regexp(r"^adm:sales:go:(1d|7d|30d|all)$"))
+async def sales_period(cb: CallbackQuery, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    start, end, label = window_for(cb.data.rsplit(":", 1)[1], get_settings().timezone)
+    await edit_or_answer(cb, await _sales_text(start, end, label), sales_result_keyboard()); await cb.answer()
+
+
+@router.callback_query(F.data == "adm:sales:custom")
+async def sales_custom_start(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    await state.set_state(StatsRange.custom); await cb.message.answer(CUSTOM_RANGE_HELP, reply_markup=admin_back_cancel("adm:sales")); await cb.answer()
+
+
+@router.message(StatsRange.custom, F.text, ~F.text.startswith("/"))
+async def sales_custom_value(message: Message, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    try: start, end, label = parse_custom_range(message.text, get_settings().timezone)
+    except ValueError as exc:
+        await message.answer(f"❌ {exc}\n\n{CUSTOM_RANGE_HELP}"); return
+    await state.clear(); await message.answer(await _sales_text(start, end, label), reply_markup=sales_result_keyboard())
+
+
+# ======================================================================= 📄 PDF of one reseller's users (right-now status)
+@router.callback_query(F.data.regexp(r"^adm:ru:pdf:\d+$"))
+async def reseller_users_pdf(cb: CallbackQuery, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    reseller_id = int(cb.data.rsplit(":", 1)[1])
+    await cb.answer("در حال ساخت گزارش...")
+    settings = get_settings()
+    try:
+        async with SessionLocal() as session:
+            if await ResellerRepository(session).get(reseller_id) is None:
+                await cb.message.answer("ریسلر پیدا نشد یا حذف شده است.", reply_markup=panel()); return
+            data = await collect_reseller_users_data(session, client(), reseller_id, settings.timezone)
+        with tempfile.TemporaryDirectory() as tmp:
+            name = f"users-reseller-{reseller_id}-{jalali_filename_datetime(settings.timezone)}.pdf"
+            path = await asyncio.to_thread(build_report_pdf, data, Path(tmp) / name, settings.pdf_font_path)
+            await cb.message.answer_document(FSInputFile(path, filename=name), caption=f"📄 وضعیت لحظه‌ای کاربران «{data.scope_label}»")
+    except MarzbanError:
+        logger.exception("Reading reseller users from the panel failed reseller_id=%s", reseller_id)
+        await cb.message.answer("❌ ارتباط با پنل برقرار نشد؛ کمی بعد دوباره تلاش کنید.")
+    except PdfFontError:
+        logger.exception("PDF font problem")
+        await cb.message.answer("❌ فونت فارسی روی سرور پیدا نشد.\nاین دستور را روی سرور اجرا کنید و ربات را ریستارت کنید:\napt install -y fonts-vazirmatn", reply_markup=panel())
+    except Exception:
+        logger.exception("Failed to build the reseller users PDF reseller_id=%s", reseller_id)
+        await cb.message.answer("❌ ساخت گزارش ناموفق بود. جزئیات در لاگ ثبت شد.", reply_markup=panel())

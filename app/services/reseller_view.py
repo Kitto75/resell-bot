@@ -120,3 +120,21 @@ def group_access_text(reseller_name: str, names: list[str], selected: list[str],
     elif dirty:
         lines += ["", "🔸 تغییرات هنوز ذخیره نشده است."]
     return rtl_lines(lines)
+
+
+def group_picker_text(title: str, question: str, picker: dict, note: str | None = None) -> str:
+    names, selected, mode = picker["names"], picker.get("selected") or [], picker["mode"]
+    lines = [title, SEPARATOR, question, "به‌صورت پیش‌فرض هیچ گروهی انتخاب نشده؛ گروه‌های موردنظر را بزنید، یا «همه گروه‌ها» را انتخاب کنید.", ""]
+    if mode == "all":
+        lines.append(f"📌 انتخاب فعلی: همه گروه‌ها ({len(names)} گروه، شامل گروه‌هایی که بعداً در پنل ساخته شوند)")
+    elif selected:
+        lines.append(f"📌 انتخاب فعلی: {len(selected)} از {len(names)}")
+        lines += [f"   • {name}" for name in selected]
+    else:
+        lines.append("📌 انتخاب فعلی: هیچ گروهی انتخاب نشده")
+    if picker.get("disabled"):
+        lines.append(f"ℹ️ {picker['disabled']} گروه غیرفعال در پنل نمایش داده نمی‌شود.")
+    lines += ["", "✅ = انتخاب‌شده   ⬜ = انتخاب‌نشده"]
+    if note:
+        lines += ["", note]
+    return rtl_lines(lines)

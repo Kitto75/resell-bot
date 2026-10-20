@@ -14,11 +14,12 @@ from app.config import get_settings
 from app.database.models import RechargeStatus, ResellerStatus, ResellerTelegramAccount, TransactionType
 from app.database.repositories import CreatedUserRepository, InboundRepository, RechargeRepository, ResellerRepository, SettingsRepository, TransactionRepository
 from app.database.session import SessionLocal
-from app.keyboards.admin import group_access_keyboard, reseller_card_keyboard, reseller_delete_keyboard, reseller_hard_delete_keyboard, reseller_list_keyboard, report_period_keyboard, report_scope_keyboard, admin_back_cancel, backup_keyboard, balance_action_keyboard, confirm_keyboard, destructive_confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_reject_keyboard, resellers_keyboard, resellers_menu, status_keyboard, reseller_bulk_actions_keyboard, reseller_bulk_confirm_keyboard, reseller_user_actions_keyboard, reseller_users_page_keyboard, telegram_account_keyboard, telegram_accounts_actions, tx_filter_keyboard, tx_page_keyboard
+from app.keyboards.admin import group_access_keyboard, group_picker_keyboard, reseller_card_keyboard, reseller_delete_keyboard, reseller_hard_delete_keyboard, reseller_list_keyboard, report_period_keyboard, report_scope_keyboard, admin_back_cancel, backup_keyboard, balance_action_keyboard, confirm_keyboard, destructive_confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_reject_keyboard, resellers_keyboard, resellers_menu, reseller_bulk_actions_keyboard, reseller_bulk_confirm_keyboard, reseller_user_actions_keyboard, reseller_users_page_keyboard, telegram_account_keyboard, telegram_accounts_actions, tx_filter_keyboard, tx_page_keyboard
 from app.services.delivery import send_account_message
 from app.services.datetime import jalali_datetime_text, jalali_filename_datetime
+from app.services import group_picker as gp
 from app.services.bulk_users import build_plan, execute_plan, fetch_plan
-from app.services.reseller_view import PAGE_SIZE as RESELLER_PAGE_SIZE, ResellerRow, delete_choice_text, group_access_text, group_summary, hard_delete_confirm_text, reseller_card_text, reseller_list_text
+from app.services.reseller_view import PAGE_SIZE as RESELLER_PAGE_SIZE, ResellerRow, delete_choice_text, group_picker_text, group_access_text, group_summary, hard_delete_confirm_text, reseller_card_text, reseller_list_text
 from app.services.pdf_report import PdfFontError, PERIOD_LABELS, build_report_pdf, collect_report_data
 from app.services.reports import transactions_page_text
 from app.services.limits import effective_detail, message_key, summary_text
@@ -47,7 +48,7 @@ def client() -> MarzbanClient:
 def money(text: str | None) -> Decimal | None:
     try: value = Decimal((text or '').strip())
     except InvalidOperation: return None
-    return value if value >= 0 else None
+    return value if value.is_finite() and value >= 0 else None
 
 
 
@@ -696,12 +697,63 @@ async def add_price(message: Message, state: FSMContext) -> None:
     await state.update_data(price=str(value)); await state.set_state(AddReseller.display_name)
     await message.answer("نام نمایشی را وارد کنید.", reply_markup=admin_back_cancel("adm:add_reseller"))
 
+def _add_confirm_text(data: dict) -> str:
+    tid = f"{data['telegram_id']}{' (@' + data['tg_username'] + ')' if data.get('tg_username') else ''}"
+    return (f"تایید ریسلر جدید:\n\nشناسه تلگرام: {tid}\nموجودی اولیه: {format_toman(data['balance'])}\nقیمت هر گیگابایت: {format_toman(data['price'])}\n"
+            f"نام نمایشی: {data['display_name']}\nدسترسی گروه‌ها: {group_summary(list(data.get('g_tags') or []), 6)}")
+
+
+def _add_picker_view(data: dict):
+    picker = data["gp"]
+    return (group_picker_text("🌐 گروه‌های دسترسی ریسلر", "کدام گروه‌ها را برای این ریسلر انتخاب کنم؟", picker),
+            group_picker_keyboard("adm:addg", picker["names"], picker["selected"], picker["mode"], "✅ ادامه", "adm:add_reseller"))
+
+
 @router.message(AddReseller.display_name)
 async def add_name(message: Message, state: FSMContext) -> None:
     name = (message.text or '').strip()
     if len(name) < 2: await message.answer("نام نمایشی باید حداقل ۲ کاراکتر باشد."); return
-    data = await state.update_data(display_name=name); await state.set_state(AddReseller.confirm)
-    await message.answer(f"تایید ریسلر جدید:\n\nشناسه تلگرام: {data['telegram_id']}{' (@' + data['tg_username'] + ')' if data.get('tg_username') else ''}\nموجودی اولیه: {format_toman(data['balance'])}\nقیمت هر گیگابایت: {format_toman(data['price'])}\nنام نمایشی: {data['display_name']}", reply_markup=confirm_keyboard("adm:add:confirm", "adm:add_reseller"))
+    await state.update_data(display_name=name)
+    note = None
+    try: picker = await gp.load_group_picker(client())
+    except MarzbanError:
+        logger.exception("Could not load panel groups while adding a reseller"); picker = None
+        note = "⚠️ گروه‌ها از پنل خوانده نشد؛ دسترسی «همه گروه‌ها» ثبت می‌شود. بعداً از کارت ریسلر ← «🌐 گروه‌ها» تغییرش دهید."
+    if picker is None:
+        data = await state.update_data(g_tags=[]); await state.set_state(AddReseller.confirm)
+        note = note or "در پنل هنوز گروه فعالی نیست؛ دسترسی «همه گروه‌ها» ثبت می‌شود."
+        await message.answer(f"{note}\n\n{_add_confirm_text(data)}", reply_markup=confirm_keyboard("adm:add:confirm", "adm:add_reseller")); return
+    data = await state.update_data(gp=picker); await state.set_state(AddReseller.groups)
+    text, markup = _add_picker_view(data); await message.answer(text, reply_markup=markup)
+
+
+@router.callback_query(AddReseller.groups, F.data == "adm:addg:all")
+async def add_groups_all(cb: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data(); data = await state.update_data(gp=gp.set_all(data["gp"]))
+    text, markup = _add_picker_view(data); await edit_or_answer(cb, text, markup); await cb.answer("همه گروه‌ها")
+
+
+@router.callback_query(AddReseller.groups, F.data.regexp(r"^adm:addg:t:\d+$"))
+async def add_groups_toggle(cb: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data(); picker = gp.toggle(data["gp"], int(cb.data.rsplit(":", 1)[1]))
+    if picker is None:
+        await cb.answer("این گزینه دیگر معتبر نیست.", show_alert=True); return
+    data = await state.update_data(gp=picker); text, markup = _add_picker_view(data); await edit_or_answer(cb, text, markup); await cb.answer()
+
+
+@router.callback_query(AddReseller.groups, F.data == "adm:addg:done")
+async def add_groups_done(cb: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    if (error := gp.validate(data["gp"])):
+        await cb.answer(error, show_alert=True); return
+    data = await state.update_data(g_tags=gp.result_tags(data["gp"])); await state.set_state(AddReseller.confirm)
+    await cb.message.answer(_add_confirm_text(data), reply_markup=confirm_keyboard("adm:add:confirm", "adm:add_reseller")); await cb.answer()
+
+
+@router.callback_query(F.data.startswith("adm:addg:"))
+async def add_groups_expired(cb: CallbackQuery, is_admin: bool) -> None:
+    if is_admin: await cb.answer("این صفحه منقضی شده است. دوباره از «افزودن ریسلر» شروع کنید.", show_alert=True)
+
 
 @router.callback_query(AddReseller.confirm, F.data == "adm:add:confirm")
 async def add_confirm(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
@@ -711,6 +763,7 @@ async def add_confirm(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> N
         async with SessionLocal() as session, session.begin():
             created = await ResellerRepository(session).add(int(data['telegram_id']), data['display_name'], Decimal(data['balance']), Decimal(data['price']))
             created_id = created.id
+            if data.get('g_tags'): await InboundRepository(session).set_allowed_tags(created_id, list(data['g_tags']))
     except IntegrityError:
         await cb.message.answer("ریسلری با این شناسه تلگرام وجود دارد. تغییری ذخیره نشد.", reply_markup=panel()); await state.clear(); await cb.answer(); return
     await state.clear(); await answer_card(cb.message, created_id, "✅ ریسلر ساخته شد."); await cb.answer()
@@ -859,18 +912,11 @@ async def edit_reseller_field(cb: CallbackQuery, state: FSMContext, is_admin: bo
 @router.callback_query(F.data.startswith("adm:editfield:"))
 async def edit_field(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
     if not is_admin: return
-    _, _, rid, field = cb.data.split(":"); await state.update_data(reseller_id=int(rid), field=field); await state.set_state(EditReseller.value)
-    if field == "status":
-        await cb.message.answer("وضعیت جدید را انتخاب کنید.", reply_markup=status_keyboard(int(rid)))
-    else:
-        await cb.message.answer(f"مقدار جدید {'نام نمایشی' if field == 'display_name' else 'قیمت هر گیگابایت'} را وارد کنید.", reply_markup=admin_back_cancel(f"adm:editsel:{rid}"))
-    await cb.answer()
-
-@router.callback_query(EditReseller.value, F.data.startswith("adm:editstatus:"))
-async def edit_status_value(cb: CallbackQuery, state: FSMContext) -> None:
-    status = cb.data.rsplit(":", 1)[1]
-    data = await state.update_data(value=status); await state.set_state(EditReseller.confirm)
-    await cb.message.answer(f"تغییر وضعیت ریسلر به {status_fa(status)} را تایید می‌کنید؟", reply_markup=confirm_keyboard("adm:edit:confirm", f"adm:editsel:{data['reseller_id']}")); await cb.answer()
+    _, _, rid, field = cb.data.split(":")
+    if field not in ("display_name", "price_per_gb"):
+        await cb.answer("این گزینه دیگر وجود ندارد.", show_alert=True); return
+    await state.update_data(reseller_id=int(rid), field=field); await state.set_state(EditReseller.value)
+    await cb.message.answer(f"مقدار جدید {'نام نمایشی' if field == 'display_name' else 'قیمت هر گیگابایت'} را وارد کنید.", reply_markup=admin_back_cancel(f"adm:editsel:{rid}")); await cb.answer()
 
 @router.message(EditReseller.value)
 async def edit_text_value(message: Message, state: FSMContext) -> None:
@@ -892,9 +938,6 @@ async def edit_confirm(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> 
         if reseller is None: await cb.answer("ریسلر پیدا نشد", show_alert=True); return
         if data['field'] == 'display_name': reseller.display_name = data['value']
         elif data['field'] == 'price_per_gb': reseller.price_per_gb = Decimal(data['value'])
-        elif data['field'] == 'status':
-            reseller.status = ResellerStatus(data['value'])
-            if data['value'] == 'active': await SettingsRepository(session).set(message_key(reseller.id), "")
     await state.clear(); await answer_card(cb.message, int(data['reseller_id']), "✅ ریسلر به‌روزرسانی شد."); await cb.answer()
 
 
