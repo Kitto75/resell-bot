@@ -30,11 +30,11 @@ async def _is_admin_username_text(message: Message, is_admin: bool = False) -> b
     return bool(is_admin) and _lookup_username(message.text) is not None
 
 
-def _qr_keyboard(username: str) -> InlineKeyboardMarkup | None:
-    data = f"adm:qr:{username}"
-    if len(data.encode()) > 64:  # Telegram callback_data limit
+def _user_actions_keyboard(username: str) -> InlineKeyboardMarkup | None:
+    qr, renew = f"adm:qr:{username}", f"adm:rn:{username}"
+    if max(len(qr.encode()), len(renew.encode())) > 64:  # Telegram callback_data limit
         return None
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📱 QR Code", callback_data=data)]])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📱 QR Code", callback_data=qr), InlineKeyboardButton(text="♻️ تمدید", callback_data=renew)]])
 
 
 async def _send_lookup(message: Message, username: str) -> None:
@@ -47,7 +47,7 @@ async def _send_lookup(message: Message, username: str) -> None:
             logger.exception("Admin user lookup failed username=%s status=%s", username, exc.status)
             await message.answer("❌ دریافت اطلاعات از پنل ناموفق بود. لاگ‌ها را بررسی کنید.")
         return
-    await message.answer(format_admin_user_info(info, get_settings().timezone), reply_markup=_qr_keyboard(username))
+    await message.answer(format_admin_user_info(info, get_settings().timezone), reply_markup=_user_actions_keyboard(username))
 
 
 @router.message(Command("user"))

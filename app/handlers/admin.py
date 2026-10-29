@@ -14,7 +14,7 @@ from app.config import get_settings
 from app.database.models import RechargeStatus, ResellerStatus, ResellerTelegramAccount, TransactionType
 from app.database.repositories import CreatedUserRepository, InboundRepository, RechargeRepository, ResellerRepository, SettingsRepository, TransactionRepository
 from app.database.session import SessionLocal
-from app.keyboards.admin import group_access_keyboard, group_picker_keyboard, reseller_card_keyboard, reseller_delete_keyboard, reseller_hard_delete_keyboard, reseller_list_keyboard, report_period_keyboard, report_scope_keyboard, admin_back_cancel, backup_keyboard, balance_action_keyboard, confirm_keyboard, destructive_confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_reject_keyboard, resellers_keyboard, resellers_menu, reseller_bulk_actions_keyboard, reseller_bulk_confirm_keyboard, reseller_user_actions_keyboard, reseller_users_page_keyboard, telegram_account_keyboard, telegram_accounts_actions, tx_filter_keyboard, tx_page_keyboard
+from app.keyboards.admin import admin_renew_days_keyboard, group_access_keyboard, group_picker_keyboard, reseller_card_keyboard, reseller_delete_keyboard, reseller_hard_delete_keyboard, reseller_list_keyboard, report_period_keyboard, report_scope_keyboard, admin_back_cancel, backup_keyboard, balance_action_keyboard, confirm_keyboard, destructive_confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_reject_keyboard, resellers_keyboard, resellers_menu, reseller_bulk_actions_keyboard, reseller_bulk_confirm_keyboard, reseller_user_actions_keyboard, reseller_users_page_keyboard, telegram_account_keyboard, telegram_accounts_actions, tx_filter_keyboard, tx_page_keyboard
 from app.services.delivery import send_account_message
 from app.services.datetime import jalali_datetime_text, jalali_filename_datetime
 from app.services import group_picker as gp
@@ -30,7 +30,7 @@ from app.services.backup import get_backup_status, send_database_backup, set_bac
 from app.services.billing import BYTES_PER_GB, BillingService
 from app.services.marzban import MarzbanClient, MarzbanError, create_payload_summary, extract_last_user_agent, marzban_payload_debug_structure, on_hold_expire_duration
 from app.services.bot_settings import get_on_hold_days
-from app.services.renewal import RenewalMode, calculate_renewal, renewal_mode_confirmation_text, renewal_wording
+from app.services.renewal import RenewalMode, calculate_renewal, renewal_mode_confirmation_text, renewal_unlimited_confirmation_text, renewal_wording
 from app.utils.formatting import format_bytes_to_gb, format_remaining_time, format_toman, status_fa
 from app.states.admin import AddReseller, AdminCreateMarzbanUser, AdminDeleteMarzbanUser, AdminDisableMarzbanUser, AdminEnableMarzbanUser, AdminRenewMarzbanUser, AdminResellerUsers, BackupSettings, BalanceEdit, EditReseller, InboundPermissions, MaintenanceMode, RechargeModeration, TelegramAccountManagement, TransactionBrowsing
 
@@ -283,6 +283,21 @@ async def admin_renew_marzban_start(cb: CallbackQuery, state: FSMContext, is_adm
     await cb.message.answer("تمدید کاربر (مدیر)\nنام کاربری اکانت را وارد کنید:", reply_markup=admin_back_cancel()); await cb.answer()
 
 
+@router.callback_query(F.data.startswith("adm:rn:"))
+async def admin_renew_from_user_card(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    """The «♻️ تمدید» button under the /user result: skips asking for the username."""
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    username = (cb.data or "").split(":", 2)[2]
+    try: await client().get_user(username)
+    except MarzbanError as exc:
+        logger.exception("Admin renew-from-card lookup failed username=%s status=%s", username, exc.status)
+        await cb.message.answer(f"❌ کاربری با نام «{username}» پیدا نشد." if exc.status == 404 else "❌ دریافت اطلاعات از پنل ناموفق بود."); await cb.answer(); return
+    async with SessionLocal() as session: wording = renewal_wording(await SettingsRepository(session).get_renewal_mode())
+    await state.clear(); await state.update_data(username=username); await state.set_state(AdminRenewMarzbanUser.gb)
+    await cb.message.answer(f"♻️ تمدید «{username}»\n{wording['gb_prompt']}:", reply_markup=admin_back_cancel("adm:panel")); await cb.answer()
+
+
 @router.message(AdminRenewMarzbanUser.username)
 async def admin_renew_marzban_username(message: Message, state: FSMContext, is_admin: bool) -> None:
     if not is_admin: return
@@ -310,7 +325,7 @@ async def admin_renew_marzban_gb(message: Message, state: FSMContext, is_admin: 
     if gb <= 0: await message.answer("حجم باید بیشتر از صفر باشد."); return
     await state.update_data(gb=gb); await state.set_state(AdminRenewMarzbanUser.days)
     async with SessionLocal() as session: wording = renewal_wording(await SettingsRepository(session).get_renewal_mode())
-    await message.answer(f"{wording['days_prompt']}:", reply_markup=admin_back_cancel("adm:mb:renew"))
+    await message.answer(f"{wording['days_prompt']}:", reply_markup=admin_renew_days_keyboard())
 
 
 @router.message(AdminRenewMarzbanUser.days)
@@ -319,38 +334,56 @@ async def admin_renew_marzban_days(message: Message, state: FSMContext, is_admin
     try: days = int(message.text or "")
     except ValueError: await message.answer("یک عدد معتبر وارد کنید."); return
     if days <= 0: await message.answer("روز باید بیشتر از صفر باشد."); return
-    data = await state.update_data(days=days); await state.set_state(AdminRenewMarzbanUser.confirm)
+    data = await state.update_data(days=days, unlimited=False); await state.set_state(AdminRenewMarzbanUser.confirm)
     async with SessionLocal() as session:
         mode = await SettingsRepository(session).get_renewal_mode()
     wording = renewal_wording(mode)
     await message.answer(f"خلاصه تمدید توسط مدیر\nنام کاربری: {data['username']}\n{wording['gb_label']}: {data['gb']} گیگابایت\n{wording['days_label']}: {days} روز\nهزینه/کسر موجودی: ندارد\n\n{renewal_mode_confirmation_text(mode)}\n\nآیا تمدید تایید شود؟", reply_markup=confirm_keyboard("adm:mb:renew:confirm", "adm:mb:renew"))
 
 
+@router.callback_query(AdminRenewMarzbanUser.days, F.data == "adm:mb:renew:unlimited")
+async def admin_renew_marzban_unlimited(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    data = await state.update_data(days=0, unlimited=True); await state.set_state(AdminRenewMarzbanUser.confirm)
+    async with SessionLocal() as session: mode = await SettingsRepository(session).get_renewal_mode()
+    wording, note = renewal_wording(mode), ""
+    try:
+        info = await client().get_user(data["username"])
+        if str(info.get("status")) == "on_hold":
+            note = "\n\nℹ️ این کاربر هنوز on_hold است؛ چون زمان ندارد، بعد از تمدید فعال (active) می‌شود."
+    except MarzbanError:
+        pass  # the confirm step reads the user again and reports a panel problem itself
+    await cb.message.answer(f"خلاصه تمدید توسط مدیر\nنام کاربری: {data['username']}\n{wording['gb_label']}: {data['gb']} گیگابایت\n{wording['days_label']}: بدون محدودیت زمان\nهزینه/کسر موجودی: ندارد\n\n{renewal_unlimited_confirmation_text(mode)}{note}\n\nآیا تمدید تایید شود؟", reply_markup=confirm_keyboard("adm:mb:renew:confirm", "adm:mb:renew")); await cb.answer()
+
+
 @router.callback_query(AdminRenewMarzbanUser.confirm, F.data == "adm:mb:renew:confirm")
 async def admin_renew_marzban_confirm(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
     if not is_admin: return
-    data = await state.get_data(); username = data["username"]; gb = int(data["gb"]); days = int(data["days"])
+    data = await state.get_data(); username = data["username"]; gb = int(data["gb"]); days = int(data["days"]); unlimited = bool(data.get("unlimited"))
     marzban = client()
     try:
         async with SessionLocal() as session:
             mode = await SettingsRepository(session).get_renewal_mode()
         user = await marzban.get_user(username)
-        calc = calculate_renewal(user, gb, days, mode)
+        calc = calculate_renewal(user, gb, days, mode, unlimited_days=unlimited)
         reset_succeeded = False
         if calc.mode is RenewalMode.replace:
             await marzban.reset_user_usage(username)
             reset_succeeded = True
         try:
-            await marzban.modify_user(username, {"data_limit": calc.resulting_data_limit, "expire": calc.resulting_expire})
+            payload = {"data_limit": calc.resulting_data_limit, "expire": calc.resulting_expire}
+            if unlimited and str(user.get("status")) == "on_hold": payload["status"] = "active"  # nothing to count down any more
+            await marzban.modify_user(username, payload)
         except MarzbanError:
             if reset_succeeded:
                 logger.exception("Admin Marzban renewal partially applied: usage reset succeeded but update failed admin_id=%s username=%s", cb.from_user.id, username)
             raise
-        logger.info("Admin Marzban renewal mode=%s admin_id=%s username=%s entered_gb=%s entered_days=%s previous_data_limit=%s previous_expire=%s resulting_data_limit=%s resulting_expire=%s usage_reset_succeeded=%s", calc.mode.value, cb.from_user.id, username, gb, days, calc.previous_data_limit, calc.previous_expire, calc.resulting_data_limit, calc.resulting_expire, reset_succeeded)
+        logger.info("Admin Marzban renewal mode=%s admin_id=%s username=%s entered_gb=%s entered_days=%s previous_data_limit=%s previous_expire=%s resulting_data_limit=%s resulting_expire=%s usage_reset_succeeded=%s unlimited_days=%s", calc.mode.value, cb.from_user.id, username, gb, days, calc.previous_data_limit, calc.previous_expire, calc.resulting_data_limit, calc.resulting_expire, reset_succeeded, unlimited)
     except MarzbanError:
         logger.exception("Admin Marzban renew failed username=%s gb=%s days=%s", username, gb, days)
         await cb.message.answer("تمدید کاربر در پنل ناموفق بود. جزئیات امن خطا در لاگ ثبت شد.", reply_markup=panel()); await state.clear(); await cb.answer(); return
-    await state.clear(); await cb.message.answer("✅ اکانت با موفقیت تمدید شد. هیچ موجودی ریسلری تغییر نکرد.", reply_markup=panel()); await cb.answer()
+    await state.clear(); await cb.message.answer(f"✅ اکانت با موفقیت تمدید شد{' (بدون محدودیت زمان)' if unlimited else ''}. هیچ موجودی ریسلری تغییر نکرد.", reply_markup=panel()); await cb.answer()
 
 
 @router.callback_query(F.data == "adm:mb:disable")

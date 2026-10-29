@@ -37,7 +37,7 @@ class RenewalCalculation:
     resulting_expire: int
     reset_required: bool
 
-def calculate_renewal(user: dict[str, Any], gb: int, days: int, mode: RenewalMode | str | None, now_ts: int | None = None) -> RenewalCalculation:
+def calculate_renewal(user: dict[str, Any], gb: int, days: int, mode: RenewalMode | str | None, now_ts: int | None = None, unlimited_days: bool = False) -> RenewalCalculation:
     parsed_mode = normalize_renewal_mode(mode.value if isinstance(mode, RenewalMode) else mode)
     now = int(now_ts if now_ts is not None else datetime.now(timezone.utc).timestamp())
     previous_data_limit = int(user.get("data_limit") or 0)
@@ -52,6 +52,8 @@ def calculate_renewal(user: dict[str, Any], gb: int, days: int, mode: RenewalMod
         resulting_data_limit = previous_data_limit + entered_bytes
         resulting_expire = max(previous_expire, now) + entered_seconds
         reset_required = False
+    if unlimited_days:
+        resulting_expire = 0  # the panel treats expire=0 as "no expiry" (admin-only option)
     return RenewalCalculation(parsed_mode, previous_data_limit, previous_expire, resulting_data_limit, resulting_expire, reset_required)
 
 
@@ -60,3 +62,10 @@ def renewal_wording(mode: RenewalMode | str | None) -> dict[str, str]:
     if normalize_renewal_mode(mode.value if isinstance(mode, RenewalMode) else mode) is RenewalMode.replace:
         return {"gb_prompt": "حجم جدید را به گیگابایت وارد کنید", "days_prompt": "تعداد روز را وارد کنید", "gb_label": "حجم جدید", "days_label": "تعداد روز"}
     return {"gb_prompt": "حجم اضافه را به گیگابایت وارد کنید", "days_prompt": "روزهای اضافه را وارد کنید", "gb_label": "حجم اضافه", "days_label": "روزهای اضافه"}
+
+
+def renewal_unlimited_confirmation_text(mode: RenewalMode | str | None) -> str:
+    """Confirmation text for an admin renewal WITHOUT a time limit."""
+    if normalize_renewal_mode(mode.value if isinstance(mode, RenewalMode) else mode) is RenewalMode.replace:
+        return "حالت تمدید: ریست و جایگزینی\nمصرف کاربر صفر می‌شود.\nحجم جدید جایگزین حجم قبلی می‌شود.\nزمان اکانت نامحدود می‌شود (تاریخ انقضا برداشته می‌شود)."
+    return "حالت تمدید: افزایشی\nحجم جدید به حجم فعلی اضافه می‌شود.\nزمان اکانت نامحدود می‌شود (تاریخ انقضا برداشته می‌شود)."

@@ -376,3 +376,11 @@ def sales_result_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🔄 بازه‌ی دیگر", callback_data="adm:sales")],
         [InlineKeyboardButton(text="⬅️ گزارش آمار", callback_data="adm:stats"), InlineKeyboardButton(text="🏠 پنل مدیریت", callback_data="adm:panel")],
     ])
+
+
+def admin_renew_days_keyboard(back_data: str = "adm:mb:renew") -> InlineKeyboardMarkup:
+    """Days step of the ADMIN renewal only: lets the admin renew without any time limit. Resellers never get this."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="♾ بدون محدودیت زمان", callback_data="adm:mb:renew:unlimited")],
+        [InlineKeyboardButton(text="⬅️ برگشت", callback_data=back_data), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")],
+    ])
