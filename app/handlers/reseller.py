@@ -19,7 +19,7 @@ from app.services.renewal import RenewalMode, calculate_renewal, renewal_mode_co
 from app.services.delivery import accounts_list_text, send_account_message
 from app.services.reports import operation_report, recharge_request_text
 from app.services.user_info import reseller_activity_lines
-from app.services.validators import valid_username
+from app.services.validators import fetch_user_by_name, valid_existing_username, valid_username
 from app.states.reseller import CreateUser, MyUsers, Recharge, RenewUser, ToggleUserStatus
 from app.utils.formatting import format_bytes_to_gb, format_remaining_time, format_toman, status_fa
 
@@ -247,11 +247,11 @@ ACCOUNT_NOT_FOUND = "اکانتی با این نام در لیست اکانت‌
 @router.message(MyUsers.lookup, F.text)
 async def my_user_link_lookup(message: Message, state: FSMContext, reseller: Reseller | None) -> None:
     if reseller is None or reseller.status != ResellerStatus.active: return
-    username = (message.text or "").strip().lower()
-    if not valid_username(username):
-        await message.answer("نام کاربری نامعتبر است. نام اکانت را کامل و دقیق بفرستید (فقط حروف کوچک انگلیسی، عدد و زیرخط)."); return
+    username = (message.text or "").strip()
+    if not valid_existing_username(username):
+        await message.answer("نام کاربری نامعتبر است. نام اکانت را کامل و دقیق بفرستید (حروف انگلیسی، عدد و - _ . @ مجاز است)."); return
     marzban = client()
-    try: info = await marzban.get_user(username)
+    try: username, info = await fetch_user_by_name(marzban.get_user, username)
     except MarzbanError as exc:
         if exc.status == 404: await message.answer(ACCOUNT_NOT_FOUND)
         else:
@@ -359,11 +359,11 @@ async def reseller_toggle_user_start(cb: CallbackQuery, state: FSMContext, resel
 @router.message(ToggleUserStatus.username)
 async def reseller_toggle_user_username(message: Message, state: FSMContext, reseller: Reseller) -> None:
     username = (message.text or "").strip()
-    if not valid_username(username):
-        await message.answer("نام کاربری نامعتبر است. فقط حروف کوچک انگلیسی، عدد و زیرخط مجاز است."); return
+    if not valid_existing_username(username):
+        await message.answer("نام کاربری نامعتبر است. نام اکانت را کامل و دقیق بفرستید (حروف انگلیسی، عدد و - _ . @ مجاز است)."); return
     data = await state.get_data(); action = data.get("toggle_action") or "disable"
     try:
-        info = await client().get_user_with_activity(username)
+        username, info = await fetch_user_by_name(client().get_user_with_activity, username)
     except MarzbanError as exc:
         logger.exception("Reseller Marzban %s fetch failed telegram_id=%s reseller=%s username=%s status=%s", action, message.from_user.id, reseller.display_name, username, exc.status)
         await message.answer("دریافت اطلاعات کاربر از پنل ممکن نشد. نام کاربری را بررسی کنید یا با پشتیبانی تماس بگیرید."); return

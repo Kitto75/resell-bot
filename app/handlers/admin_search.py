@@ -4,7 +4,6 @@ This router is included LAST and only matches when the admin has NO active FSM s
 so it can never interfere with create/renew/recharge/... flows that are waiting for text.
 """
 import logging
-import re
 
 from aiogram import F, Router
 from aiogram.filters import Command, StateFilter
@@ -14,16 +13,15 @@ from app.config import get_settings
 from app.handlers.admin import _primary_subscription_url, client
 from app.services.delivery import send_account_message
 from app.services.marzban import MarzbanError
+from app.services.validators import fetch_user_by_name, valid_existing_username
 from app.services.user_info import format_admin_user_info
 
 logger = logging.getLogger(__name__)
 router = Router()
-LOOKUP_RE = re.compile(r"^[A-Za-z0-9_]{3,64}$")
-
-
 def _lookup_username(text: str | None) -> str | None:
+    """The typed name if it looks like a panel username (letters, digits and _ - . @ are all valid there)."""
     candidate = (text or "").strip()
-    return candidate.lower() if LOOKUP_RE.fullmatch(candidate) else None
+    return candidate if valid_existing_username(candidate) else None
 
 
 async def _is_admin_username_text(message: Message, is_admin: bool = False) -> bool:
@@ -38,8 +36,9 @@ def _user_actions_keyboard(username: str) -> InlineKeyboardMarkup | None:
 
 
 async def _send_lookup(message: Message, username: str) -> None:
+    panel = client()
     try:
-        info = await client().get_user_with_activity(username)
+        username, info = await fetch_user_by_name(panel.get_user_with_activity, username)
     except MarzbanError as exc:
         if exc.status == 404:
             await message.answer(f"❌ کاربری با نام «{username}» در پنل پیدا نشد.")
@@ -47,7 +46,7 @@ async def _send_lookup(message: Message, username: str) -> None:
             logger.exception("Admin user lookup failed username=%s status=%s", username, exc.status)
             await message.answer("❌ دریافت اطلاعات از پنل ناموفق بود. لاگ‌ها را بررسی کنید.")
         return
-    await message.answer(format_admin_user_info(info, get_settings().timezone), reply_markup=_user_actions_keyboard(username))
+    await message.answer(format_admin_user_info(info, get_settings().timezone), reply_markup=_user_actions_keyboard(str(info.get("username") or username)))
 
 
 @router.message(Command("user"))
