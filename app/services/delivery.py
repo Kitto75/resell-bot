@@ -30,6 +30,8 @@ def limit_text(data_limit: Any, spaced: bool = False) -> str:
 
 
 def days_text(days: int) -> str:
+    if days <= 0:
+        return "Unlimited"
     return f"{days} Day" if days == 1 else f"{days} Days"
 
 

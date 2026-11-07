@@ -1,6 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import ROUND_HALF_UP, Decimal
 from enum import Enum
 from typing import Any
 
@@ -37,12 +38,12 @@ class RenewalCalculation:
     resulting_expire: int
     reset_required: bool
 
-def calculate_renewal(user: dict[str, Any], gb: int, days: int, mode: RenewalMode | str | None, now_ts: int | None = None, unlimited_days: bool = False) -> RenewalCalculation:
+def calculate_renewal(user: dict[str, Any], gb: int | str | Decimal, days: int, mode: RenewalMode | str | None, now_ts: int | None = None, unlimited_days: bool = False) -> RenewalCalculation:
     parsed_mode = normalize_renewal_mode(mode.value if isinstance(mode, RenewalMode) else mode)
     now = int(now_ts if now_ts is not None else datetime.now(timezone.utc).timestamp())
     previous_data_limit = int(user.get("data_limit") or 0)
     previous_expire = int(user.get("expire") or 0)
-    entered_bytes = int(gb) * BYTES_PER_GB
+    entered_bytes = int((Decimal(str(gb)) * BYTES_PER_GB).to_integral_value(rounding=ROUND_HALF_UP))
     entered_seconds = int(days) * SECONDS_PER_DAY
     if parsed_mode is RenewalMode.replace:
         resulting_data_limit = entered_bytes

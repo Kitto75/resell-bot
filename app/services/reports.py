@@ -2,7 +2,7 @@ import re
 from app.config import get_settings
 from app.database.models import OperationLog, OperationType, Reseller, TransactionType
 from app.services.datetime import jalali_datetime_text, persian_date_time
-from app.utils.formatting import format_toman
+from app.utils.formatting import format_gb, format_toman
 
 # Every line starts with an RLM so Telegram lays the whole line out right-to-left,
 # and balances are written on separate lines instead of "A → B" (arrows flip in RTL text).
@@ -79,7 +79,7 @@ def operation_report(reseller: Reseller, log: OperationLog) -> str:
     lines += [
         f"🏷 نام کاربری: {log.username}",
         "",
-        f"📦 حجم: {log.added_gb} گیگابایت",
+        f"📦 حجم: {format_gb(log.added_gb)} گیگابایت",
         f"📅 مدت: {log.added_days} روز",
         f"💰 هزینه: {format_toman(log.charged_amount)}",
         f"موجودی قبل: {format_toman(log.balance_before)}",

@@ -18,7 +18,7 @@ from app.services.datetime import jalali_datetime_text, tehran_now
 from app.services.limits import describe, effective_detail
 from app.services.marzban import MarzbanError
 from app.services.reports import clean_tx_description, tx_type_label
-from app.utils.formatting import format_toman, status_fa
+from app.utils.formatting import format_gb, format_toman, status_fa
 
 logger = logging.getLogger(__name__)
 MAX_ROWS_PER_SECTION = 2000
@@ -126,7 +126,7 @@ async def collect_report_data(session: AsyncSession, reseller_id: int | None, pe
         return [[names.get(t.reseller_id, "-"), jalali_datetime_text(t.created_at, tz_name), tx_type_label(t.type), format_toman(abs(t.amount)), format_toman(t.balance_before), format_toman(t.balance_after), clean_tx_description(t.description)] for t in items]
 
     def log_rows(items):
-        return [[names.get(l.reseller_id, "-"), jalali_datetime_text(l.created_at, tz_name), l.username, f"{l.added_gb} GB", f"{l.added_days} روز", format_toman(l.charged_amount), format_toman(l.balance_after)] for l in items]
+        return [[names.get(l.reseller_id, "-"), jalali_datetime_text(l.created_at, tz_name), l.username, f"{format_gb(l.added_gb)} GB", f"{l.added_days} روز", format_toman(l.charged_amount), format_toman(l.balance_after)] for l in items]
 
     tx_headers = ["ریسلر", "تاریخ", "نوع", "مبلغ", "موجودی قبل", "موجودی بعد", "توضیح"]
     log_headers = ["ریسلر", "تاریخ", "نام کاربری", "حجم", "مدت", "هزینه", "موجودی بعد"]
@@ -134,8 +134,8 @@ async def collect_report_data(session: AsyncSession, reseller_id: int | None, pe
     for title, headers, rows_all, footer in [
         ("شارژ و افزایش موجودی", tx_headers, tx_rows(credits), f"تعداد: {len(credits)}  |  جمع کل: {format_toman(_sum(t.amount for t in credits))}"),
         ("کاهش و تنظیم موجودی", tx_headers, tx_rows(debits), f"تعداد: {len(debits)}  |  جمع کاهش‌ها: {format_toman(abs(_sum(t.amount for t in debits if t.type == TransactionType.decrease)))}"),
-        ("ساخت کاربر", log_headers, log_rows(creates), f"تعداد: {len(creates)}  |  جمع هزینه: {format_toman(_sum(l.charged_amount for l in creates))}  |  جمع حجم: {sum(l.added_gb for l in creates)} GB"),
-        ("تمدید کاربر", log_headers, log_rows(renews), f"تعداد: {len(renews)}  |  جمع هزینه: {format_toman(_sum(l.charged_amount for l in renews))}  |  جمع حجم: {sum(l.added_gb for l in renews)} GB"),
+        ("ساخت کاربر", log_headers, log_rows(creates), f"تعداد: {len(creates)}  |  جمع هزینه: {format_toman(_sum(l.charged_amount for l in creates))}  |  جمع حجم: {format_gb(sum(l.added_gb for l in creates))} GB"),
+        ("تمدید کاربر", log_headers, log_rows(renews), f"تعداد: {len(renews)}  |  جمع هزینه: {format_toman(_sum(l.charged_amount for l in renews))}  |  جمع حجم: {format_gb(sum(l.added_gb for l in renews))} GB"),
     ]:
         rows, note = _capped(rows_all)
         sections.append(Section(title, headers, rows, footer, note))

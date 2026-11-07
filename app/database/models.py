@@ -103,7 +103,7 @@ class CreatedUser(Base):
     reseller_id: Mapped[int] = mapped_column(ForeignKey("resellers.id", ondelete="CASCADE"), index=True)
     username: Mapped[str] = mapped_column(String(255), index=True)
     marzban_status: Mapped[str] = mapped_column(String(50), default="on_hold")
-    total_gb: Mapped[int] = mapped_column(Integer, default=0)
+    total_gb: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=Decimal("0"))  # SQLite columns are dynamically typed, so existing INTEGER columns store 1.5 as-is
     total_days: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (UniqueConstraint("username", name="uq_created_users_username"), Index("ix_created_users_reseller_username", "reseller_id", "username"),)
@@ -121,7 +121,7 @@ class OperationLog(Base):
     reseller_id: Mapped[int] = mapped_column(ForeignKey("resellers.id", ondelete="CASCADE"), index=True)
     username: Mapped[str] = mapped_column(String(255), index=True)
     operation_type: Mapped[OperationType] = mapped_column(SAEnum(OperationType))
-    added_gb: Mapped[int] = mapped_column(Integer)
+    added_gb: Mapped[Decimal] = mapped_column(Numeric(10, 2))
     added_days: Mapped[int] = mapped_column(Integer)
     charged_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     balance_before: Mapped[Decimal] = mapped_column(Numeric(12, 2))

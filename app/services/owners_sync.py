@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import timezone
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
@@ -13,6 +14,7 @@ from sqlalchemy import select
 from app.database.models import CreatedUser
 from app.database.repositories import ResellerRepository
 from app.services.user_info import parse_panel_datetime
+from app.services.validators import ADMIN_OWNER_NAME
 
 OWNER_PREFIX = "belongs to "
 BYTES_PER_GB = 1024 ** 3
@@ -34,6 +36,7 @@ class SyncResult:
     added: dict[str, int] = field(default_factory=dict)
     moved: dict[str, int] = field(default_factory=dict)
     unknown_owners: dict[str, int] = field(default_factory=dict)
+    admin_owned: int = 0
     missing_in_panel: int = 0
 
     @property
@@ -51,12 +54,12 @@ def _row_values(user: dict[str, Any]) -> dict[str, Any]:
     if on_hold_seconds: days = on_hold_seconds // 86400
     elif expire and created: days = max(0, (expire - int(created.timestamp())) // 86400)
     else: days = 0
-    values: dict[str, Any] = {"marzban_status": str(getattr(user.get("status"), "value", user.get("status")) or "active"), "total_gb": round(limit / BYTES_PER_GB), "total_days": days}
+    values: dict[str, Any] = {"marzban_status": str(getattr(user.get("status"), "value", user.get("status")) or "active"), "total_gb": (Decimal(limit) / BYTES_PER_GB).quantize(Decimal("0.01")), "total_days": days}
     if created: values["created_at"] = created.astimezone(timezone.utc).replace(tzinfo=None)  # same naive-UTC form the database default produces
     return values
 
 
-async def sync_owners(session, panel_users: list[dict[str, Any]]) -> SyncResult:
+async def sync_owners(session, panel_users: list[dict[str, Any]], admin_ids: tuple[int, ...] | list[int] = ()) -> SyncResult:
     """Caller owns the transaction. Never deletes anything; only adds rows and fixes the owner of existing ones."""
     result = SyncResult(scanned=len(panel_users))
     by_name = {r.display_name: r for r in await ResellerRepository(session).list(include_archived=True)}
@@ -69,6 +72,8 @@ async def sync_owners(session, panel_users: list[dict[str, Any]]) -> SyncResult:
         owner = parse_owner(user.get("note"))
         if owner is None:
             result.no_owner += 1; continue
+        if owner == ADMIN_OWNER_NAME or (owner.isdigit() and int(owner) in set(admin_ids)):
+            result.admin_owned += 1; continue  # "belongs to admin" (or an admin's numeric id from older notes) is never a reseller
         reseller = by_name.get(owner)
         if reseller is None:
             result.unknown_owners[owner] = result.unknown_owners.get(owner, 0) + 1; continue
@@ -92,6 +97,8 @@ def report_text(result: SyncResult, sample: int = 8) -> str:
              f"🔁 مالک اصلاح شد: {result.moved_total}",
              f"✔️ از قبل درست بود: {result.unchanged}",
              f"➖ بدون note مالکیت: {result.no_owner}"]
+    if result.admin_owned:
+        lines.append(f"👑 متعلق به ادمین: {result.admin_owned}")
     if result.unknown_owners:
         names = "، ".join(f"{name} ({count})" for name, count in sorted(result.unknown_owners.items(), key=lambda kv: -kv[1])[:sample])
         lines.append(f"❓ مالک ناشناس: {sum(result.unknown_owners.values())} → {names}")

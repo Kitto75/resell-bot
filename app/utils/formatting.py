@@ -48,3 +48,12 @@ def format_remaining_time(expire: Any = None, remaining_seconds: Any = None, rem
 def status_fa(status: Any) -> str:
     value = getattr(status, 'value', status)
     return {'active': 'فعال', 'disabled': 'غیرفعال', 'archived': 'بایگانی‌شده', 'on_hold': 'در انتظار اتصال', 'limited': 'محدود', 'expired': 'منقضی'}.get(str(value), str(value))
+
+
+def format_gb(value: Any) -> str:
+    """Volume in GB without noise: 10 -> '10', Decimal('1.50') -> '1.5'."""
+    number = _decimal(value)
+    text = f"{number:f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"

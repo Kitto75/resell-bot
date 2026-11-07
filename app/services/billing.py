@@ -1,22 +1,32 @@
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database.models import BalanceTransaction, CreatedUser, OperationLog, OperationType, Reseller, TransactionType
 
 BYTES_PER_GB = 1024 ** 3
 
+
+def gb_to_bytes(gb) -> int:
+    """Volume in GB (int, str or Decimal, e.g. 1.5) -> whole bytes."""
+    return int((Decimal(str(gb)) * BYTES_PER_GB).to_integral_value(rounding=ROUND_HALF_UP))
+
+
 class InsufficientBalanceError(ValueError): pass
 
 class BillingService:
     def __init__(self, session: AsyncSession) -> None: self.session = session
-    def calculate_cost(self, gb: int, price_per_gb: Decimal) -> Decimal: return Decimal(gb) * price_per_gb
+    @staticmethod
+    def calculate_cost(gb, price_per_gb: Decimal) -> Decimal:
+        """Whole toman: a fractional volume such as 1.25 GB is priced and rounded half-up."""
+        return (Decimal(str(gb)) * Decimal(price_per_gb)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
     async def change_balance(self, reseller: Reseller, amount: Decimal, tx_type: TransactionType, description: str | None = None, created_by: int | None = None) -> BalanceTransaction:
         before = reseller.balance; after = before + amount
         if after < 0: raise InsufficientBalanceError("موجودی کافی نیست")
         reseller.balance = after
         tx = BalanceTransaction(reseller_id=reseller.id, type=tx_type, amount=amount, balance_before=before, balance_after=after, description=description, created_by=created_by)
         self.session.add(tx); await self.session.flush(); return tx
-    async def charge_for_operation(self, reseller: Reseller, username: str, operation: OperationType, gb: int, days: int, actor_telegram_id: int | None = None) -> OperationLog:
+    async def charge_for_operation(self, reseller: Reseller, username: str, operation: OperationType, gb, days: int, actor_telegram_id: int | None = None) -> OperationLog:
+        gb = Decimal(str(gb))
         cost = self.calculate_cost(gb, reseller.price_per_gb)
         tx_type = TransactionType.create_user if operation == OperationType.create else TransactionType.renew_user
         tx = await self.change_balance(reseller, -cost, tx_type, f"{'ساخت' if operation == OperationType.create else 'تمدید'} {username}", actor_telegram_id or reseller.telegram_id)
@@ -26,7 +36,7 @@ class BillingService:
             self.session.add(CreatedUser(reseller_id=reseller.id, username=username, total_gb=gb, total_days=days))
         await self.session.flush(); return log
 
-    async def charge_for_create_once(self, reseller: Reseller, username: str, gb: int, days: int, actor_telegram_id: int | None = None) -> OperationLog | None:
+    async def charge_for_create_once(self, reseller: Reseller, username: str, gb, days: int, actor_telegram_id: int | None = None) -> OperationLog | None:
         existing = await self.session.scalar(select(CreatedUser).where(CreatedUser.username == username).with_for_update())
         if existing is not None:
             return None

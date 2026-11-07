@@ -384,3 +384,11 @@ def admin_renew_days_keyboard(back_data: str = "adm:mb:renew") -> InlineKeyboard
         [InlineKeyboardButton(text="♾ بدون محدودیت زمان", callback_data="adm:mb:renew:unlimited")],
         [InlineKeyboardButton(text="⬅️ برگشت", callback_data=back_data), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")],
     ])
+
+
+def admin_create_days_keyboard(back_data: str = "adm:mb:create") -> InlineKeyboardMarkup:
+    """Days step of the ADMIN create-user flow: lets the admin create an account without any time limit."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="♾ بدون محدودیت زمان", callback_data="adm:mb:create:unlimited")],
+        [InlineKeyboardButton(text="⬅️ برگشت", callback_data=back_data), InlineKeyboardButton(text="❌ لغو", callback_data="adm:cancel")],
+    ])

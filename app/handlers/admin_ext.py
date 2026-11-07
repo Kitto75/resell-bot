@@ -435,7 +435,7 @@ async def settings_sync_run(cb: CallbackQuery, is_admin: bool) -> None:
         progress = await cb.message.answer("⏳ در حال خواندن کاربران پنل و تطبیق با note ها...")
         try:
             users = await client().list_all_users()
-            async with SessionLocal() as session, session.begin(): result = await sync_owners(session, users)
+            async with SessionLocal() as session, session.begin(): result = await sync_owners(session, users, tuple(get_settings().admin_ids))
         except MarzbanError:
             logger.exception("Sync users owners failed while reading the panel")
             await progress.edit_text("❌ ارتباط با پنل برقرار نشد. چیزی تغییر نکرد؛ کمی بعد دوباره تلاش کنید.", reply_markup=settings_sync_keyboard()); return

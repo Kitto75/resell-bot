@@ -14,7 +14,7 @@ from app.config import get_settings
 from app.database.models import RechargeStatus, ResellerStatus, ResellerTelegramAccount, TransactionType
 from app.database.repositories import CreatedUserRepository, InboundRepository, RechargeRepository, ResellerRepository, SettingsRepository, TransactionRepository
 from app.database.session import SessionLocal
-from app.keyboards.admin import admin_renew_days_keyboard, group_access_keyboard, group_picker_keyboard, reseller_card_keyboard, reseller_delete_keyboard, reseller_hard_delete_keyboard, reseller_list_keyboard, report_period_keyboard, report_scope_keyboard, admin_back_cancel, backup_keyboard, balance_action_keyboard, confirm_keyboard, destructive_confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_reject_keyboard, resellers_keyboard, resellers_menu, reseller_bulk_actions_keyboard, reseller_bulk_confirm_keyboard, reseller_user_actions_keyboard, reseller_users_page_keyboard, telegram_account_keyboard, telegram_accounts_actions, tx_filter_keyboard, tx_page_keyboard
+from app.keyboards.admin import admin_create_days_keyboard, admin_renew_days_keyboard, group_access_keyboard, group_picker_keyboard, reseller_card_keyboard, reseller_delete_keyboard, reseller_hard_delete_keyboard, reseller_list_keyboard, report_period_keyboard, report_scope_keyboard, admin_back_cancel, backup_keyboard, balance_action_keyboard, confirm_keyboard, destructive_confirm_keyboard, edit_field_keyboard, inbound_keyboard, maintenance_keyboard, panel, recharge_reject_keyboard, resellers_keyboard, resellers_menu, reseller_bulk_actions_keyboard, reseller_bulk_confirm_keyboard, reseller_user_actions_keyboard, reseller_users_page_keyboard, telegram_account_keyboard, telegram_accounts_actions, tx_filter_keyboard, tx_page_keyboard
 from app.services.delivery import send_account_message
 from app.services.datetime import jalali_datetime_text, jalali_filename_datetime
 from app.services import group_picker as gp
@@ -25,13 +25,13 @@ from app.services.reports import transactions_page_text
 from app.services.limits import effective_detail, message_key, summary_text
 from app.services.tg_resolve import resolve_input
 from app.states.admin import ReportScope
-from app.services.validators import valid_username
+from app.services.validators import ADMIN_OWNER_NOTE, is_reserved_reseller_name, parse_gb, valid_username
 from app.services.backup import get_backup_status, send_database_backup, set_backup_enabled, set_backup_interval, sqlite_backup_supported
-from app.services.billing import BYTES_PER_GB, BillingService
+from app.services.billing import BillingService, gb_to_bytes
 from app.services.marzban import MarzbanClient, MarzbanError, create_payload_summary, extract_last_user_agent, marzban_payload_debug_structure, on_hold_expire_duration
 from app.services.bot_settings import get_on_hold_days
 from app.services.renewal import RenewalMode, calculate_renewal, renewal_mode_confirmation_text, renewal_unlimited_confirmation_text, renewal_wording
-from app.utils.formatting import format_bytes_to_gb, format_remaining_time, format_toman, status_fa
+from app.utils.formatting import format_bytes_to_gb, format_remaining_time, format_gb, format_toman, status_fa
 from app.states.admin import AddReseller, AdminCreateMarzbanUser, AdminDeleteMarzbanUser, AdminDisableMarzbanUser, AdminEnableMarzbanUser, AdminRenewMarzbanUser, AdminResellerUsers, BackupSettings, BalanceEdit, EditReseller, InboundPermissions, MaintenanceMode, RechargeModeration, TelegramAccountManagement, TransactionBrowsing
 
 router = Router()
@@ -230,11 +230,15 @@ async def admin_create_marzban_username(message: Message, state: FSMContext, is_
 @router.message(AdminCreateMarzbanUser.gb)
 async def admin_create_marzban_gb(message: Message, state: FSMContext, is_admin: bool) -> None:
     if not is_admin: return
-    try: gb = int(message.text or "")
-    except ValueError: await message.answer("یک عدد صحیح معتبر وارد کنید."); return
-    if gb <= 0: await message.answer("حجم باید بیشتر از صفر باشد."); return
-    await state.update_data(gb=gb); await state.set_state(AdminCreateMarzbanUser.days)
-    await message.answer("مدت اعتبار را به روز وارد کنید:", reply_markup=admin_back_cancel("adm:mb:create"))
+    try: gb = parse_gb(message.text)
+    except ValueError as exc: await message.answer(str(exc)); return
+    await state.update_data(gb=str(gb)); await state.set_state(AdminCreateMarzbanUser.days)
+    await message.answer("مدت اعتبار را به روز وارد کنید:", reply_markup=admin_create_days_keyboard())
+
+
+def _admin_create_summary(data: dict, unlimited: bool) -> str:
+    duration = "مدت اعتبار: بدون محدودیت زمان\nوضعیت اولیه: فعال (تاریخ انقضا ندارد)" if unlimited else f"مدت اعتبار پس از فعال‌سازی: {data['days']} روز\nوضعیت اولیه: در انتظار اتصال"
+    return f"خلاصه ساخت کاربر (مدیر)\nنام کاربری: {data['username']}\nحجم: {format_gb(data['gb'])} گیگابایت\n{duration}\nهزینه/کسر موجودی: ندارد\nآیا تایید می‌کنید؟"
 
 
 @router.message(AdminCreateMarzbanUser.days)
@@ -243,21 +247,31 @@ async def admin_create_marzban_days(message: Message, state: FSMContext, is_admi
     try: days = int(message.text or "")
     except ValueError: await message.answer("یک عدد صحیح معتبر وارد کنید."); return
     if days <= 0: await message.answer("مدت اعتبار باید بیشتر از صفر باشد."); return
-    data = await state.update_data(days=days); await state.set_state(AdminCreateMarzbanUser.confirm)
-    await message.answer(
-        f"خلاصه ساخت کاربر (مدیر)\nنام کاربری: {data['username']}\nحجم: {data['gb']} گیگابایت\nمدت اعتبار پس از فعال‌سازی: {days} روز\nوضعیت اولیه: در انتظار اتصال\nهزینه/کسر موجودی: ندارد\nآیا تایید می‌کنید؟",
-        reply_markup=confirm_keyboard("adm:mb:create:confirm", "adm:mb:create"),
-    )
+    data = await state.update_data(days=days, unlimited=False); await state.set_state(AdminCreateMarzbanUser.confirm)
+    await message.answer(_admin_create_summary(data, False), reply_markup=confirm_keyboard("adm:mb:create:confirm", "adm:mb:create"))
+
+
+@router.callback_query(AdminCreateMarzbanUser.days, F.data == "adm:mb:create:unlimited")
+async def admin_create_marzban_unlimited(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    """Admin-only: create the account without any time limit (active, no expiry)."""
+    if not is_admin:
+        await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
+    data = await state.update_data(days=0, unlimited=True); await state.set_state(AdminCreateMarzbanUser.confirm)
+    await cb.message.answer(_admin_create_summary(data, True), reply_markup=confirm_keyboard("adm:mb:create:confirm", "adm:mb:create")); await cb.answer()
 
 
 @router.callback_query(AdminCreateMarzbanUser.confirm, F.data == "adm:mb:create:confirm")
 async def admin_create_marzban_confirm(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
     if not is_admin: return
-    data = await state.get_data(); username = data["username"]; gb = int(data["gb"]); days = int(data["days"])
+    data = await state.get_data(); username = data["username"]; gb = Decimal(str(data["gb"])); days = int(data["days"]); unlimited = bool(data.get("unlimited"))
     marzban = client()
-    payload = {"username": username, "status": "on_hold", "data_limit": gb * BYTES_PER_GB, "on_hold_expire_duration": on_hold_expire_duration(days), "validity_days": days, "note": f"created by admin {cb.from_user.id}"}
-    async with SessionLocal() as session: hold_days = await get_on_hold_days(session)
-    if hold_days: payload["on_hold_days"] = hold_days  # admin setting: leave on_hold after N days
+    if unlimited:
+        # no time limit -> nothing to wait for: the account is simply active and has no expiry
+        payload = {"username": username, "status": "active", "data_limit": gb_to_bytes(gb), "note": ADMIN_OWNER_NOTE}
+    else:
+        payload = {"username": username, "status": "on_hold", "data_limit": gb_to_bytes(gb), "on_hold_expire_duration": on_hold_expire_duration(days), "validity_days": days, "note": ADMIN_OWNER_NOTE}
+        async with SessionLocal() as session: hold_days = await get_on_hold_days(session)
+        if hold_days: payload["on_hold_days"] = hold_days  # admin setting: leave on_hold after N days
     try:
         try:
             await marzban.get_user(username)
@@ -265,14 +279,14 @@ async def admin_create_marzban_confirm(cb: CallbackQuery, state: FSMContext, is_
         except MarzbanError as exc:
             if exc.status != 404: raise
         payload = await marzban.build_create_payload(payload)
-        logger.info("Admin Marzban create sanitized payload summary=%s", create_payload_summary(payload))
+        logger.info("Admin Marzban create sanitized payload summary=%s unlimited=%s", create_payload_summary(payload), unlimited)
         await marzban.create_user(payload)
         created_user = await marzban.get_user(username)
     except (MarzbanError, ValueError) as exc:
         logger.exception("Admin Marzban create failed username=%s payload_summary=%s", username, create_payload_summary(payload))
         await cb.message.answer("ساخت کاربر در پنل ناموفق بود. جزئیات امن خطا در لاگ ثبت شد.", reply_markup=panel()); await state.clear(); await cb.answer(); return
     subscription_url = marzban.absolute_subscription_url(_primary_subscription_url(created_user))
-    await state.clear(); await _send_admin_create_success(cb.message, username, subscription_url, gb * BYTES_PER_GB, days); await cb.answer()
+    await state.clear(); await _send_admin_create_success(cb.message, username, subscription_url, gb_to_bytes(gb), days); await cb.answer()
 
 
 @router.callback_query(F.data == "adm:mb:renew")
@@ -320,10 +334,9 @@ async def admin_renew_marzban_confirm_user(cb: CallbackQuery, state: FSMContext,
 @router.message(AdminRenewMarzbanUser.gb)
 async def admin_renew_marzban_gb(message: Message, state: FSMContext, is_admin: bool) -> None:
     if not is_admin: return
-    try: gb = int(message.text or "")
-    except ValueError: await message.answer("یک عدد معتبر وارد کنید."); return
-    if gb <= 0: await message.answer("حجم باید بیشتر از صفر باشد."); return
-    await state.update_data(gb=gb); await state.set_state(AdminRenewMarzbanUser.days)
+    try: gb = parse_gb(message.text)
+    except ValueError as exc: await message.answer(str(exc)); return
+    await state.update_data(gb=str(gb)); await state.set_state(AdminRenewMarzbanUser.days)
     async with SessionLocal() as session: wording = renewal_wording(await SettingsRepository(session).get_renewal_mode())
     await message.answer(f"{wording['days_prompt']}:", reply_markup=admin_renew_days_keyboard())
 
@@ -338,7 +351,7 @@ async def admin_renew_marzban_days(message: Message, state: FSMContext, is_admin
     async with SessionLocal() as session:
         mode = await SettingsRepository(session).get_renewal_mode()
     wording = renewal_wording(mode)
-    await message.answer(f"خلاصه تمدید توسط مدیر\nنام کاربری: {data['username']}\n{wording['gb_label']}: {data['gb']} گیگابایت\n{wording['days_label']}: {days} روز\nهزینه/کسر موجودی: ندارد\n\n{renewal_mode_confirmation_text(mode)}\n\nآیا تمدید تایید شود؟", reply_markup=confirm_keyboard("adm:mb:renew:confirm", "adm:mb:renew"))
+    await message.answer(f"خلاصه تمدید توسط مدیر\nنام کاربری: {data['username']}\n{wording['gb_label']}: {format_gb(data['gb'])} گیگابایت\n{wording['days_label']}: {days} روز\nهزینه/کسر موجودی: ندارد\n\n{renewal_mode_confirmation_text(mode)}\n\nآیا تمدید تایید شود؟", reply_markup=confirm_keyboard("adm:mb:renew:confirm", "adm:mb:renew"))
 
 
 @router.callback_query(AdminRenewMarzbanUser.days, F.data == "adm:mb:renew:unlimited")
@@ -354,13 +367,13 @@ async def admin_renew_marzban_unlimited(cb: CallbackQuery, state: FSMContext, is
             note = "\n\nℹ️ این کاربر هنوز on_hold است؛ چون زمان ندارد، بعد از تمدید فعال (active) می‌شود."
     except MarzbanError:
         pass  # the confirm step reads the user again and reports a panel problem itself
-    await cb.message.answer(f"خلاصه تمدید توسط مدیر\nنام کاربری: {data['username']}\n{wording['gb_label']}: {data['gb']} گیگابایت\n{wording['days_label']}: بدون محدودیت زمان\nهزینه/کسر موجودی: ندارد\n\n{renewal_unlimited_confirmation_text(mode)}{note}\n\nآیا تمدید تایید شود؟", reply_markup=confirm_keyboard("adm:mb:renew:confirm", "adm:mb:renew")); await cb.answer()
+    await cb.message.answer(f"خلاصه تمدید توسط مدیر\nنام کاربری: {data['username']}\n{wording['gb_label']}: {format_gb(data['gb'])} گیگابایت\n{wording['days_label']}: بدون محدودیت زمان\nهزینه/کسر موجودی: ندارد\n\n{renewal_unlimited_confirmation_text(mode)}{note}\n\nآیا تمدید تایید شود؟", reply_markup=confirm_keyboard("adm:mb:renew:confirm", "adm:mb:renew")); await cb.answer()
 
 
 @router.callback_query(AdminRenewMarzbanUser.confirm, F.data == "adm:mb:renew:confirm")
 async def admin_renew_marzban_confirm(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
     if not is_admin: return
-    data = await state.get_data(); username = data["username"]; gb = int(data["gb"]); days = int(data["days"]); unlimited = bool(data.get("unlimited"))
+    data = await state.get_data(); username = data["username"]; gb = Decimal(str(data["gb"])); days = int(data["days"]); unlimited = bool(data.get("unlimited"))
     marzban = client()
     try:
         async with SessionLocal() as session:
@@ -730,6 +743,9 @@ async def add_price(message: Message, state: FSMContext) -> None:
     await state.update_data(price=str(value)); await state.set_state(AddReseller.display_name)
     await message.answer("نام نمایشی را وارد کنید.", reply_markup=admin_back_cancel("adm:add_reseller"))
 
+RESERVED_NAME_TEXT = "نام «admin» رزرو شده است (اکانت‌های ساخته‌شده توسط مدیر با note «belongs to admin» ثبت می‌شوند). نام دیگری انتخاب کنید."
+
+
 def _add_confirm_text(data: dict) -> str:
     tid = f"{data['telegram_id']}{' (@' + data['tg_username'] + ')' if data.get('tg_username') else ''}"
     return (f"تایید ریسلر جدید:\n\nشناسه تلگرام: {tid}\nموجودی اولیه: {format_toman(data['balance'])}\nقیمت هر گیگابایت: {format_toman(data['price'])}\n"
@@ -746,6 +762,7 @@ def _add_picker_view(data: dict):
 async def add_name(message: Message, state: FSMContext) -> None:
     name = (message.text or '').strip()
     if len(name) < 2: await message.answer("نام نمایشی باید حداقل ۲ کاراکتر باشد."); return
+    if is_reserved_reseller_name(name): await message.answer(RESERVED_NAME_TEXT); return
     await state.update_data(display_name=name)
     note = None
     try: picker = await gp.load_group_picker(client())
@@ -955,6 +972,7 @@ async def edit_field(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> No
 async def edit_text_value(message: Message, state: FSMContext) -> None:
     data = await state.get_data(); field = data['field']; value = (message.text or '').strip()
     if field == 'display_name' and len(value) < 2: await message.answer("نام نمایشی باید حداقل ۲ کاراکتر باشد."); return
+    if field == 'display_name' and is_reserved_reseller_name(value): await message.answer(RESERVED_NAME_TEXT); return
     if field == 'price_per_gb':
         amount = money(value)
         if amount is None or amount <= 0: await message.answer("قیمت هر گیگابایت باید بیشتر از صفر باشد."); return

@@ -36,3 +36,36 @@ async def fetch_user_by_name(fetch, value: str):
     assert last is not None
     raise last
 
+
+# ---- volume (GB): decimals like 1.5 or 12.6 are allowed, at most two digits after the separator
+_GB_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+_GB_RE = re.compile(r"^\d{1,6}(?:\.\d{1,2})?$")
+MAX_GB = 100_000
+GB_FORMAT_HELP = "یک عدد معتبر وارد کنید (اعشار مجاز است، مثل 10 یا 1.5)."
+
+
+def parse_gb(text: str | None):
+    """'1.5' / '۱٫۵' / '12,6' -> Decimal. Raises ValueError with a message that can be shown to the user."""
+    from decimal import Decimal
+
+    raw = (text or "").strip().translate(_GB_DIGITS).replace("٫", ".").replace(",", ".")
+    if re.fullmatch(r"\d+\.\d{3,}", raw):
+        raise ValueError("حداکثر دو رقم اعشار مجاز است (مثل 1.25).")
+    if not _GB_RE.fullmatch(raw):
+        raise ValueError(GB_FORMAT_HELP)
+    value = Decimal(raw)
+    if value <= 0:
+        raise ValueError("حجم باید بیشتر از صفر باشد.")
+    if value > MAX_GB:
+        raise ValueError(f"حجم نمی‌تواند بیشتر از {MAX_GB} گیگابایت باشد.")
+    return value
+
+
+# The note admin-created accounts carry. "admin" is reserved: no reseller may use it as a display name,
+# otherwise it would "own" every admin-created account.
+ADMIN_OWNER_NAME = "admin"
+ADMIN_OWNER_NOTE = f"belongs to {ADMIN_OWNER_NAME}"
+
+
+def is_reserved_reseller_name(name: str | None) -> bool:
+    return (name or "").strip().lower() == ADMIN_OWNER_NAME
