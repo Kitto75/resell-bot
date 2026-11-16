@@ -238,7 +238,29 @@ async def admin_create_marzban_gb(message: Message, state: FSMContext, is_admin:
 
 def _admin_create_summary(data: dict, unlimited: bool) -> str:
     duration = "مدت اعتبار: بدون محدودیت زمان\nوضعیت اولیه: فعال (تاریخ انقضا ندارد)" if unlimited else f"مدت اعتبار پس از فعال‌سازی: {data['days']} روز\nوضعیت اولیه: در انتظار اتصال"
-    return f"خلاصه ساخت کاربر (مدیر)\nنام کاربری: {data['username']}\nحجم: {format_gb(data['gb'])} گیگابایت\n{duration}\nهزینه/کسر موجودی: ندارد\nآیا تایید می‌کنید؟"
+    return (f"خلاصه ساخت کاربر (مدیر)\nنام کاربری: {data['username']}\nحجم: {format_gb(data['gb'])} گیگابایت\n{duration}\n"
+            f"گروه: {group_summary(list(data.get('g_tags') or []), 6)}\nهزینه/کسر موجودی: ندارد\nآیا تایید می‌کنید؟")
+
+
+def _create_picker_view(data: dict):
+    picker = data["gp"]
+    return (group_picker_text("🌐 گروه کاربر", "کاربر جدید عضو کدام گروه‌ها باشد؟", picker),
+            group_picker_keyboard("adm:mbg", picker["names"], picker["selected"], picker["mode"], "✅ ادامه", "adm:mb:create"))
+
+
+async def _admin_create_choose_groups(message: Message, state: FSMContext) -> None:
+    """Step after the time: pick the panel groups of the new user (default: nothing selected, must choose)."""
+    try: picker = await gp.load_group_picker(client())
+    except MarzbanError:
+        logger.exception("Admin create: could not load panel groups")
+        await message.answer("❌ دریافت گروه‌ها از پنل ممکن نشد. اتصال پنل را بررسی کنید و دوباره تلاش کنید.", reply_markup=panel()); await state.clear(); return
+    if picker is None:
+        await message.answer("در پنل هنوز گروه فعالی وجود ندارد. اول در پنل یک گروه بسازید.", reply_markup=panel()); await state.clear(); return
+    if len(picker["names"]) == 1:  # nothing to choose between
+        data = await state.update_data(g_tags=list(picker["names"])); await state.set_state(AdminCreateMarzbanUser.confirm)
+        await message.answer(_admin_create_summary(data, bool(data.get("unlimited"))), reply_markup=confirm_keyboard("adm:mb:create:confirm", "adm:mb:create")); return
+    data = await state.update_data(gp=picker); await state.set_state(AdminCreateMarzbanUser.groups)
+    text, markup = _create_picker_view(data); await message.answer(text, reply_markup=markup)
 
 
 @router.message(AdminCreateMarzbanUser.days)
@@ -247,8 +269,8 @@ async def admin_create_marzban_days(message: Message, state: FSMContext, is_admi
     try: days = int(message.text or "")
     except ValueError: await message.answer("یک عدد صحیح معتبر وارد کنید."); return
     if days <= 0: await message.answer("مدت اعتبار باید بیشتر از صفر باشد."); return
-    data = await state.update_data(days=days, unlimited=False); await state.set_state(AdminCreateMarzbanUser.confirm)
-    await message.answer(_admin_create_summary(data, False), reply_markup=confirm_keyboard("adm:mb:create:confirm", "adm:mb:create"))
+    await state.update_data(days=days, unlimited=False)
+    await _admin_create_choose_groups(message, state)
 
 
 @router.callback_query(AdminCreateMarzbanUser.days, F.data == "adm:mb:create:unlimited")
@@ -256,8 +278,39 @@ async def admin_create_marzban_unlimited(cb: CallbackQuery, state: FSMContext, i
     """Admin-only: create the account without any time limit (active, no expiry)."""
     if not is_admin:
         await cb.answer("فقط مدیر مجاز است.", show_alert=True); return
-    data = await state.update_data(days=0, unlimited=True); await state.set_state(AdminCreateMarzbanUser.confirm)
-    await cb.message.answer(_admin_create_summary(data, True), reply_markup=confirm_keyboard("adm:mb:create:confirm", "adm:mb:create")); await cb.answer()
+    await state.update_data(days=0, unlimited=True); await cb.answer()
+    await _admin_create_choose_groups(cb.message, state)
+
+
+@router.callback_query(AdminCreateMarzbanUser.groups, F.data == "adm:mbg:all")
+async def admin_create_groups_all(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    data = await state.get_data(); data = await state.update_data(gp=gp.set_all(data["gp"]))
+    text, markup = _create_picker_view(data); await edit_or_answer(cb, text, markup); await cb.answer("همه گروه‌ها")
+
+
+@router.callback_query(AdminCreateMarzbanUser.groups, F.data.regexp(r"^adm:mbg:t:\d+$"))
+async def admin_create_groups_toggle(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    data = await state.get_data(); picker = gp.toggle(data["gp"], int(cb.data.rsplit(":", 1)[1]))
+    if picker is None:
+        await cb.answer("این گزینه دیگر معتبر نیست.", show_alert=True); return
+    data = await state.update_data(gp=picker); text, markup = _create_picker_view(data); await edit_or_answer(cb, text, markup); await cb.answer()
+
+
+@router.callback_query(AdminCreateMarzbanUser.groups, F.data == "adm:mbg:done")
+async def admin_create_groups_done(cb: CallbackQuery, state: FSMContext, is_admin: bool) -> None:
+    if not is_admin: return
+    data = await state.get_data()
+    if (error := gp.validate(data["gp"])):
+        await cb.answer(error, show_alert=True); return
+    data = await state.update_data(g_tags=gp.result_tags(data["gp"])); await state.set_state(AdminCreateMarzbanUser.confirm)
+    await cb.message.answer(_admin_create_summary(data, bool(data.get("unlimited"))), reply_markup=confirm_keyboard("adm:mb:create:confirm", "adm:mb:create")); await cb.answer()
+
+
+@router.callback_query(F.data.startswith("adm:mbg:"))
+async def admin_create_groups_expired(cb: CallbackQuery, is_admin: bool) -> None:
+    if is_admin: await cb.answer("این صفحه منقضی شده است. دوباره از «ساخت کاربر» شروع کنید.", show_alert=True)
 
 
 @router.callback_query(AdminCreateMarzbanUser.confirm, F.data == "adm:mb:create:confirm")
@@ -278,8 +331,8 @@ async def admin_create_marzban_confirm(cb: CallbackQuery, state: FSMContext, is_
             await cb.message.answer("این نام کاربری از قبل در پنل وجود دارد. لطفاً نام دیگری انتخاب کنید.", reply_markup=panel()); await state.clear(); await cb.answer(); return
         except MarzbanError as exc:
             if exc.status != 404: raise
-        payload = await marzban.build_create_payload(payload)
-        logger.info("Admin Marzban create sanitized payload summary=%s unlimited=%s", create_payload_summary(payload), unlimited)
+        payload = await marzban.build_create_payload(payload, list(data.get("g_tags") or []) or None)  # chosen groups; none chosen = all
+        logger.info("Admin Marzban create sanitized payload summary=%s unlimited=%s groups=%s", create_payload_summary(payload), unlimited, data.get("g_tags") or "ALL")
         await marzban.create_user(payload)
         created_user = await marzban.get_user(username)
     except (MarzbanError, ValueError) as exc:

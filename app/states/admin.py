@@ -57,6 +57,7 @@ class AdminCreateMarzbanUser(StatesGroup):
     username = State()
     gb = State()
     days = State()
+    groups = State()
     confirm = State()
 
 
