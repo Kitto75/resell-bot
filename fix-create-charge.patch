@@ -1,0 +1,165 @@
+diff --git a/app/database/repositories.py b/app/database/repositories.py
+index 36cdc49..669b754 100644
+--- a/app/database/repositories.py
++++ b/app/database/repositories.py
+@@ -82,6 +82,11 @@ class CreatedUserRepository:
+     async def count_by_reseller(self, reseller_id: int) -> int:
+         return int(await self.session.scalar(select(func.count(CreatedUser.id)).where(CreatedUser.reseller_id == reseller_id)) or 0)
+ 
++    async def forget(self, username: str) -> int:
++        """Drop the local record of an account that was deleted from the panel."""
++        result = await self.session.execute(delete(CreatedUser).where(CreatedUser.username == username))
++        return int(result.rowcount or 0)
++
+     async def list_usernames_by_reseller(self, reseller_id: int, limit: int = 100, offset: int = 0) -> builtins.list[str]:
+         stmt = (
+             select(CreatedUser.username)
+diff --git a/app/handlers/admin.py b/app/handlers/admin.py
+index ba1562b..824b2c8 100644
+--- a/app/handlers/admin.py
++++ b/app/handlers/admin.py
+@@ -558,6 +558,11 @@ async def admin_delete_marzban_confirm(cb: CallbackQuery, state: FSMContext, is_
+         logger.exception("Admin Marzban delete failed admin_id=%s username=%s status=%s", cb.from_user.id, username, exc.status)
+         await cb.message.answer(_safe_marzban_error_message("حذف کاربر", exc), reply_markup=panel()); await state.clear(); await cb.answer(); return
+     logger.info("Admin deleted Marzban user admin_id=%s username=%s", cb.from_user.id, username)
++    try:
++        async with SessionLocal() as session, session.begin(): forgotten = await CreatedUserRepository(session).forget(username)
++        logger.info("Forgot the local record of the deleted user username=%s rows=%s", username, forgotten)
++    except Exception:
++        logger.exception("Could not remove the local record of the deleted user username=%s", username)
+     await state.clear(); await cb.message.answer("✅ کاربر با موفقیت حذف شد. هیچ موجودی ریسلری تغییر نکرد.", reply_markup=panel()); await cb.answer()
+ 
+ 
+diff --git a/app/handlers/reseller.py b/app/handlers/reseller.py
+index f4ec355..b99d61d 100644
+--- a/app/handlers/reseller.py
++++ b/app/handlers/reseller.py
+@@ -33,6 +33,15 @@ MARZBAN_CREATE_FAILED = "ساخت اکانت در پنل ناموفق بود. ل
+ POST_CREATE_VERIFY_DELAY_SECONDS = 3
+ MY_USERS_PAGE_SIZE = 10
+ 
++async def notify_admins(bot, text: str) -> None:
++    """Tell every admin; one admin who blocked the bot / never started it must not break the reseller's flow."""
++    for admin_id in get_settings().admin_ids:
++        try:
++            await bot.send_message(admin_id, text)
++        except Exception:
++            logger.warning("Could not notify admin_id=%s", admin_id, exc_info=True)
++
++
+ async def current_renewal_wording() -> dict[str, str]:
+     async with SessionLocal() as session:
+         return renewal_wording(await SettingsRepository(session).get_renewal_mode())
+@@ -215,8 +224,7 @@ async def send_create_debug_report(cb: CallbackQuery, username: str, reseller_na
+         f"خلاصه payload: {summary}\n"
+         "پیشنهاد: پنل payload ساخت کاربر را رد کرده یا API پنل خطای داخلی داده است. ساخت و سپس بررسی کاربر را در پنل/API پنل مقایسه کنید."
+     )
+-    for admin_id in get_settings().admin_ids:
+-        await cb.bot.send_message(admin_id, text)
++    await notify_admins(cb.bot, text)
+ 
+ @router.callback_query(F.data == "back")
+ async def back_to_dashboard(cb: CallbackQuery, state: FSMContext, reseller: Reseller | None) -> None:
+@@ -307,7 +315,7 @@ async def create_confirm(cb: CallbackQuery, state: FSMContext, reseller: Reselle
+     limits = await reseller_limits(reseller.id)
+     if (error := limits.check_gb(gb) or limits.check_days(days)):
+         await cb.message.answer(f"محدودیت‌های تعیین‌شده توسط مدیر تغییر کرده است.\n{error}\nلطفاً دوباره از ابتدا شروع کنید."); await state.clear(); await cb.answer(); return
+-    report = None
++    report, charge_failed = None, False
+     async with SessionLocal() as session:
+         async with session.begin():
+             db_reseller = await session.get(type(reseller), reseller.id)
+@@ -327,14 +335,23 @@ async def create_confirm(cb: CallbackQuery, state: FSMContext, reseller: Reselle
+                 if create_error is not None:
+                     await send_create_debug_report(cb, username, db_reseller.display_name, create_error, payload)
+                 await cb.message.answer(error_message or MARZBAN_CREATE_FAILED); await state.clear(); await cb.answer(); return
+-            log = await BillingService(session).charge_for_create_once(db_reseller, username, gb, days, cb.from_user.id)
+-            if log is None:
+-                logger.info("Create charge skipped username=%s reseller_id=%s reason=already_recorded", username, db_reseller.id)
++            reseller_name = db_reseller.display_name
++            try:
++                async with session.begin_nested():  # a failure here must not undo (or hide) what already happened in the panel
++                    log = await BillingService(session).charge_for_create_once(db_reseller, username, gb, days, cb.from_user.id)
++            except Exception:
++                logger.exception("CRITICAL: account created in the panel but the charge could not be recorded username=%s reseller_id=%s cost=%s", username, db_reseller.id, cost)
++                log, charge_failed = None, True
++            if charge_failed:
++                pass
++            elif log is None:
++                logger.warning("Create charge skipped username=%s reseller_id=%s reason=duplicate_confirm", username, db_reseller.id)
+             else:
+                 logger.info("Create charge applied username=%s reseller_id=%s", username, db_reseller.id)
+                 report = operation_report(db_reseller, log)
+-    if report:
+-        for admin_id in get_settings().admin_ids: await cb.bot.send_message(admin_id, report)
++    if report: await notify_admins(cb.bot, report)
++    if charge_failed:
++        await notify_admins(cb.bot, f"⚠️ هشدار: اکانت «{username}» برای ریسلر «{reseller_name}» ({format_gb(gb)} گیگابایت، {days} روز) در پنل ساخته شد، ولی ثبت هزینه و گزارش در ربات انجام نشد.\nهزینه‌ی محاسبه‌شده: {format_toman(cost)} (موجودی ریسلر تغییر نکرده است).\nلطفاً از «کارت ریسلر ← موجودی» دستی اصلاح کنید و لاگ ربات را بررسی کنید.")
+     subscription_url = marzban.absolute_subscription_url(primary_subscription_url(created_user))
+     logger.info("Marzban subscription link resolved username=%s found=%s", username, bool(subscription_url))
+     await state.clear(); await send_create_success_to_reseller(cb, username, subscription_url, gb_to_bytes(gb), days); await cb.answer()
+@@ -470,7 +487,7 @@ async def renew_confirm(cb: CallbackQuery, state: FSMContext, reseller: Reseller
+             logger.exception("Reseller Marzban renewal failed telegram_id=%s reseller=%s username=%s gb=%s days=%s", cb.from_user.id, db_reseller.display_name, username, gb, days)
+             await cb.message.answer("تمدید کاربر در پنل ناموفق بود. جزئیات امن خطا در لاگ ثبت شد."); await state.clear(); await cb.answer(); return
+         log = await BillingService(session).charge_for_operation(db_reseller, username, OperationType.renew, gb, days, cb.from_user.id); report = operation_report(db_reseller, log)
+-    for admin_id in get_settings().admin_ids: await cb.bot.send_message(admin_id, report)
++    await notify_admins(cb.bot, report)
+     await state.clear(); await cb.message.answer("✅ اکانت با موفقیت تمدید شد."); await cb.answer()
+ 
+ @router.callback_query(F.data == "res:recharge")
+diff --git a/app/services/billing.py b/app/services/billing.py
+index fc4efea..83133b8 100644
+--- a/app/services/billing.py
++++ b/app/services/billing.py
+@@ -1,9 +1,11 @@
++from datetime import datetime, timedelta, timezone
+ from decimal import ROUND_HALF_UP, Decimal
+ from sqlalchemy import select
+ from sqlalchemy.ext.asyncio import AsyncSession
+ from app.database.models import BalanceTransaction, CreatedUser, OperationLog, OperationType, Reseller, TransactionType
+ 
+ BYTES_PER_GB = 1024 ** 3
++DUPLICATE_CREATE_WINDOW = timedelta(minutes=10)  # a second confirm for the same account within this time is a double click
+ 
+ 
+ def gb_to_bytes(gb) -> int:
+@@ -25,19 +27,35 @@ class BillingService:
+         reseller.balance = after
+         tx = BalanceTransaction(reseller_id=reseller.id, type=tx_type, amount=amount, balance_before=before, balance_after=after, description=description, created_by=created_by)
+         self.session.add(tx); await self.session.flush(); return tx
+-    async def charge_for_operation(self, reseller: Reseller, username: str, operation: OperationType, gb, days: int, actor_telegram_id: int | None = None) -> OperationLog:
++    async def charge_for_operation(self, reseller: Reseller, username: str, operation: OperationType, gb, days: int, actor_telegram_id: int | None = None, track_user: bool = True) -> OperationLog:
+         gb = Decimal(str(gb))
+         cost = self.calculate_cost(gb, reseller.price_per_gb)
+         tx_type = TransactionType.create_user if operation == OperationType.create else TransactionType.renew_user
+         tx = await self.change_balance(reseller, -cost, tx_type, f"{'ساخت' if operation == OperationType.create else 'تمدید'} {username}", actor_telegram_id or reseller.telegram_id)
+         log = OperationLog(reseller_id=reseller.id, username=username, operation_type=operation, added_gb=gb, added_days=days, charged_amount=cost, balance_before=tx.balance_before, balance_after=tx.balance_after, created_by=actor_telegram_id or reseller.telegram_id)
+         self.session.add(log)
+-        if operation == OperationType.create:
++        if operation == OperationType.create and track_user:
+             self.session.add(CreatedUser(reseller_id=reseller.id, username=username, total_gb=gb, total_days=days))
+         await self.session.flush(); return log
+ 
+     async def charge_for_create_once(self, reseller: Reseller, username: str, gb, days: int, actor_telegram_id: int | None = None) -> OperationLog | None:
++        """Charge for a freshly created panel account.
++
++        Only a genuine double click is skipped (the same reseller already paid for this username a moment ago).
++        A leftover local record - the account was deleted from the panel earlier and the name is being reused - must NOT
++        make the new account free: the record is taken over and the account is charged and reported as usual."""
+         existing = await self.session.scalar(select(CreatedUser).where(CreatedUser.username == username).with_for_update())
+-        if existing is not None:
++        if existing is None:
++            return await self.charge_for_operation(reseller, username, OperationType.create, gb, days, actor_telegram_id)
++        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - DUPLICATE_CREATE_WINDOW
++        paid_just_now = await self.session.scalar(select(OperationLog.id).where(
++            OperationLog.reseller_id == reseller.id, OperationLog.username == username,
++            OperationLog.operation_type == OperationType.create, OperationLog.created_at >= cutoff).limit(1))
++        if paid_just_now is not None:
+             return None
+-        return await self.charge_for_operation(reseller, username, OperationType.create, gb, days, actor_telegram_id)
++        log = await self.charge_for_operation(reseller, username, OperationType.create, gb, days, actor_telegram_id, track_user=False)
++        existing.reseller_id = reseller.id
++        existing.total_gb = Decimal(str(gb)); existing.total_days = days; existing.marzban_status = "on_hold"
++        existing.created_at = datetime.now(timezone.utc).replace(tzinfo=None)
++        await self.session.flush()
++        return log

@@ -82,6 +82,11 @@ class CreatedUserRepository:
     async def count_by_reseller(self, reseller_id: int) -> int:
         return int(await self.session.scalar(select(func.count(CreatedUser.id)).where(CreatedUser.reseller_id == reseller_id)) or 0)
 
+    async def forget(self, username: str) -> int:
+        """Drop the local record of an account that was deleted from the panel."""
+        result = await self.session.execute(delete(CreatedUser).where(CreatedUser.username == username))
+        return int(result.rowcount or 0)
+
     async def list_usernames_by_reseller(self, reseller_id: int, limit: int = 100, offset: int = 0) -> builtins.list[str]:
         stmt = (
             select(CreatedUser.username)

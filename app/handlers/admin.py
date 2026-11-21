@@ -558,6 +558,11 @@ async def admin_delete_marzban_confirm(cb: CallbackQuery, state: FSMContext, is_
         logger.exception("Admin Marzban delete failed admin_id=%s username=%s status=%s", cb.from_user.id, username, exc.status)
         await cb.message.answer(_safe_marzban_error_message("حذف کاربر", exc), reply_markup=panel()); await state.clear(); await cb.answer(); return
     logger.info("Admin deleted Marzban user admin_id=%s username=%s", cb.from_user.id, username)
+    try:
+        async with SessionLocal() as session, session.begin(): forgotten = await CreatedUserRepository(session).forget(username)
+        logger.info("Forgot the local record of the deleted user username=%s rows=%s", username, forgotten)
+    except Exception:
+        logger.exception("Could not remove the local record of the deleted user username=%s", username)
     await state.clear(); await cb.message.answer("✅ کاربر با موفقیت حذف شد. هیچ موجودی ریسلری تغییر نکرد.", reply_markup=panel()); await cb.answer()
 
 

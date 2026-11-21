@@ -33,6 +33,15 @@ MARZBAN_CREATE_FAILED = "ساخت اکانت در پنل ناموفق بود. ل
 POST_CREATE_VERIFY_DELAY_SECONDS = 3
 MY_USERS_PAGE_SIZE = 10
 
+async def notify_admins(bot, text: str) -> None:
+    """Tell every admin; one admin who blocked the bot / never started it must not break the reseller's flow."""
+    for admin_id in get_settings().admin_ids:
+        try:
+            await bot.send_message(admin_id, text)
+        except Exception:
+            logger.warning("Could not notify admin_id=%s", admin_id, exc_info=True)
+
+
 async def current_renewal_wording() -> dict[str, str]:
     async with SessionLocal() as session:
         return renewal_wording(await SettingsRepository(session).get_renewal_mode())
@@ -215,8 +224,7 @@ async def send_create_debug_report(cb: CallbackQuery, username: str, reseller_na
         f"خلاصه payload: {summary}\n"
         "پیشنهاد: پنل payload ساخت کاربر را رد کرده یا API پنل خطای داخلی داده است. ساخت و سپس بررسی کاربر را در پنل/API پنل مقایسه کنید."
     )
-    for admin_id in get_settings().admin_ids:
-        await cb.bot.send_message(admin_id, text)
+    await notify_admins(cb.bot, text)
 
 @router.callback_query(F.data == "back")
 async def back_to_dashboard(cb: CallbackQuery, state: FSMContext, reseller: Reseller | None) -> None:
@@ -307,7 +315,7 @@ async def create_confirm(cb: CallbackQuery, state: FSMContext, reseller: Reselle
     limits = await reseller_limits(reseller.id)
     if (error := limits.check_gb(gb) or limits.check_days(days)):
         await cb.message.answer(f"محدودیت‌های تعیین‌شده توسط مدیر تغییر کرده است.\n{error}\nلطفاً دوباره از ابتدا شروع کنید."); await state.clear(); await cb.answer(); return
-    report = None
+    report, charge_failed = None, False
     async with SessionLocal() as session:
         async with session.begin():
             db_reseller = await session.get(type(reseller), reseller.id)
@@ -327,14 +335,23 @@ async def create_confirm(cb: CallbackQuery, state: FSMContext, reseller: Reselle
                 if create_error is not None:
                     await send_create_debug_report(cb, username, db_reseller.display_name, create_error, payload)
                 await cb.message.answer(error_message or MARZBAN_CREATE_FAILED); await state.clear(); await cb.answer(); return
-            log = await BillingService(session).charge_for_create_once(db_reseller, username, gb, days, cb.from_user.id)
-            if log is None:
-                logger.info("Create charge skipped username=%s reseller_id=%s reason=already_recorded", username, db_reseller.id)
+            reseller_name = db_reseller.display_name
+            try:
+                async with session.begin_nested():  # a failure here must not undo (or hide) what already happened in the panel
+                    log = await BillingService(session).charge_for_create_once(db_reseller, username, gb, days, cb.from_user.id)
+            except Exception:
+                logger.exception("CRITICAL: account created in the panel but the charge could not be recorded username=%s reseller_id=%s cost=%s", username, db_reseller.id, cost)
+                log, charge_failed = None, True
+            if charge_failed:
+                pass
+            elif log is None:
+                logger.warning("Create charge skipped username=%s reseller_id=%s reason=duplicate_confirm", username, db_reseller.id)
             else:
                 logger.info("Create charge applied username=%s reseller_id=%s", username, db_reseller.id)
                 report = operation_report(db_reseller, log)
-    if report:
-        for admin_id in get_settings().admin_ids: await cb.bot.send_message(admin_id, report)
+    if report: await notify_admins(cb.bot, report)
+    if charge_failed:
+        await notify_admins(cb.bot, f"⚠️ هشدار: اکانت «{username}» برای ریسلر «{reseller_name}» ({format_gb(gb)} گیگابایت، {days} روز) در پنل ساخته شد، ولی ثبت هزینه و گزارش در ربات انجام نشد.\nهزینه‌ی محاسبه‌شده: {format_toman(cost)} (موجودی ریسلر تغییر نکرده است).\nلطفاً از «کارت ریسلر ← موجودی» دستی اصلاح کنید و لاگ ربات را بررسی کنید.")
     subscription_url = marzban.absolute_subscription_url(primary_subscription_url(created_user))
     logger.info("Marzban subscription link resolved username=%s found=%s", username, bool(subscription_url))
     await state.clear(); await send_create_success_to_reseller(cb, username, subscription_url, gb_to_bytes(gb), days); await cb.answer()
@@ -470,7 +487,7 @@ async def renew_confirm(cb: CallbackQuery, state: FSMContext, reseller: Reseller
             logger.exception("Reseller Marzban renewal failed telegram_id=%s reseller=%s username=%s gb=%s days=%s", cb.from_user.id, db_reseller.display_name, username, gb, days)
             await cb.message.answer("تمدید کاربر در پنل ناموفق بود. جزئیات امن خطا در لاگ ثبت شد."); await state.clear(); await cb.answer(); return
         log = await BillingService(session).charge_for_operation(db_reseller, username, OperationType.renew, gb, days, cb.from_user.id); report = operation_report(db_reseller, log)
-    for admin_id in get_settings().admin_ids: await cb.bot.send_message(admin_id, report)
+    await notify_admins(cb.bot, report)
     await state.clear(); await cb.message.answer("✅ اکانت با موفقیت تمدید شد."); await cb.answer()
 
 @router.callback_query(F.data == "res:recharge")
